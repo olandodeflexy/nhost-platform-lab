@@ -8,8 +8,7 @@ on:
       - main
 
 permissions:
-  contents: write
-  pull-requests: read
+  contents: read
 
 jobs:
   create-release:
@@ -20,22 +19,10 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - name: Generate GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
-          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
-
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Extract release version
+      - name: Validate release request
         id: release
         env:
+          MERGE_COMMIT: ${{ github.event.pull_request.merge_commit_sha }}
           TITLE: ${{ github.event.pull_request.title }}
         shell: bash
         run: |
@@ -45,15 +32,72 @@ jobs:
             exit 1
           fi
           version="${BASH_REMATCH[1]}"
-          echo "version=$version" >>"$GITHUB_OUTPUT"
-          echo "tag=demo-api@$version" >>"$GITHUB_OUTPUT"
+          if [[ ! "$MERGE_COMMIT" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+            echo "merged pull request did not resolve to a Git commit" >&2
+            exit 1
+          fi
+          {
+            echo "commit=$MERGE_COMMIT"
+            echo "version=$version"
+            echo "tag=demo-api@$version"
+          } >>"$GITHUB_OUTPUT"
 
-      - name: Create GitHub release
+      - name: Check out exact merged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ steps.release.outputs.commit }}
+
+      - name: Verify exact release target
+        env:
+          EXPECTED_COMMIT: ${{ steps.release.outputs.commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_commit="$(git rev-parse HEAD)"
+          if [ "$actual_commit" != "$EXPECTED_COMMIT" ]; then
+            echo "checked-out commit does not match the merged pull request" >&2
+            exit 1
+          fi
+
+      - name: Generate least-privilege GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Create and verify immutable release tag
+        env:
+          COMMIT: ${{ steps.release.outputs.commit }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f ref="refs/tags/${TAG}" \
+            -f sha="$COMMIT" \
+            --silent; then
+            echo "release tag already exists or could not be created; verifying target" >&2
+          fi
+          tag_target="$(
+            gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" \
+              --jq 'select(.object.type == "commit") | .object.sha'
+          )"
+          if [ "$tag_target" != "$COMMIT" ]; then
+            echo "release tag does not point to the merged pull request" >&2
+            exit 1
+          fi
+
+      - name: Create GitHub release from verified tag
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           TAG: ${{ steps.release.outputs.tag }}
         run: >-
           gh release create "$TAG"
-          --target main
+          --verify-tag
           --title "$TAG"
           --generate-notes

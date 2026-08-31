@@ -1,0 +1,56 @@
+.DS_Store
+.direnv/
+
+# Local environment and authentication material
+.env
+.env.*
+!.env.example
+!.env.*.example
+/.aws/
+/.kube/
+/.docker/config.json
+kubeconfig
+kubeconfig.*
+*.kubeconfig
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_ed25519
+
+# Terraform working data and local inputs
+.terraform/
+.terragrunt-cache/
+*.tfplan
+*.plan
+tfplan
+plan.out
+terraform.plan
+*.tfstate
+*.tfstate.*
+.terraform.tfstate.lock.info
+*.tfvars
+*.tfvars.json
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Generated build outputs
+result
+result-*
+coverage.out
+dist/
+/services/demo-api/bin/
+
+# Private operational record; intentionally retained only on the operator's machine
+/docs/aws-account-bootstrap-engineering-note.md
+/docs/cost-and-safety.md
+/docs/evidence-and-assumptions.md

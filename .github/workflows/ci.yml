@@ -1,0 +1,78 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Check public repository surface
+        run: nix develop --no-update-lock-file --command ./scripts/check-public-surface.sh
+
+      - name: Check locked Nix builds
+        run: nix flake check --no-update-lock-file --print-build-logs
+
+      - name: Validate rendered Kubernetes resources
+        run: nix run --no-update-lock-file .#manifest-check
+
+      - name: Check scripts
+        run: >-
+          nix develop --no-update-lock-file --command
+          shellcheck scripts/*.sh .githooks/*
+
+      - name: Check GitHub Actions workflows
+        run: nix develop --no-update-lock-file --command actionlint
+
+      - name: Check Terraform formatting
+        run: nix develop --no-update-lock-file --command terraform fmt -check -recursive infra
+
+      - name: Check Terragrunt formatting
+        run: >-
+          nix develop --no-update-lock-file --command
+          terragrunt hcl fmt --check --working-dir infra/live --exclude-dir .terraform
+
+      - name: Validate Terragrunt configuration graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Generate non-real 12-digit values without storing account-like
+          # literals in the repository or contacting AWS.
+          NHOST_CORE_ACCOUNT_ID="$(printf '%012d' 1)"
+          NHOST_NONPROD_ACCOUNT_ID="$(printf '%012d' 2)"
+          NHOST_PROD_ACCOUNT_ID="$(printf '%012d' 3)"
+          export NHOST_CORE_ACCOUNT_ID
+          export NHOST_NONPROD_ACCOUNT_ID
+          export NHOST_PROD_ACCOUNT_ID
+          nix develop --no-update-lock-file --command \
+            terragrunt hcl validate --working-dir infra/live
+
+      - name: Validate Terraform roots
+        run: nix develop --no-update-lock-file --command ./scripts/validate-terraform.sh
+
+      - name: Lint platform charts
+        run: |
+          nix develop --no-update-lock-file --command \
+            helm lint infra/modules/platform-addons/charts/cluster-prerequisites
+          nix develop --no-update-lock-file --command \
+            helm lint infra/modules/platform-addons/charts/platform-config

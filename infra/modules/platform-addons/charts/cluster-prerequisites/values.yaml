@@ -1,0 +1,6 @@
+clusterName: ""
+workloadNamespace: demo-api
+workloadDeployerGroups:
+  - nhost-platform-lab:demo-api-deployers
+storageClass:
+  name: gp3-encrypted

@@ -1,0 +1,7 @@
+clusterName: ""
+environment: nonprod
+awsRegion: eu-west-1
+letsencryptEmail: replace-me@example.com
+karpenter:
+  nodeRole: ""
+  amiAlias: al2023@latest

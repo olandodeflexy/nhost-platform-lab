@@ -1,0 +1,34 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: workload-monitoring-editor
+  namespace: {{ required "workloadNamespace is required" .Values.workloadNamespace | quote }}
+rules:
+  - apiGroups:
+      - operator.victoriametrics.com
+    resources:
+      - vmservicescrapes
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workload-monitoring-editors
+  namespace: {{ required "workloadNamespace is required" .Values.workloadNamespace | quote }}
+subjects:
+{{- range $group := .Values.workloadDeployerGroups }}
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: {{ $group | quote }}
+{{- end }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: workload-monitoring-editor

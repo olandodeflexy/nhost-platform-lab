@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+images:
+  - name: demo-api
+    newName: example.invalid/nhost-platform-lab/demo-api
+    newTag: dev
+patches:
+  - path: deployment-patch.yaml
+  - path: autoscaling-patch.yaml
+  - path: disruption-budget-patch.yaml
+  - path: ingress-patch.yaml

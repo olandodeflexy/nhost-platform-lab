@@ -1,0 +1,5 @@
+self-hosted-runner:
+  labels:
+    - nonprod
+    - prod-eu-west-1
+    - prod-us-east-1

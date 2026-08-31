@@ -1,0 +1,15 @@
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: demo-api
+  labels:
+    monitoring: platform
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: demo-api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 5s

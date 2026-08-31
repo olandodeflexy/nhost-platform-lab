@@ -1,0 +1,15 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-api
+spec:
+  replicas: 2
+  template:
+    spec:
+      containers:
+        - name: demo-api
+          env:
+            - name: APP_ENV
+              value: nonprod
+            - name: AWS_REGION
+              value: eu-west-1

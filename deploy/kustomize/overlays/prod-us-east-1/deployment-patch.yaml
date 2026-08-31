@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-api
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+        - name: demo-api
+          env:
+            - name: APP_ENV
+              value: production
+            - name: AWS_REGION
+              value: us-east-1
+          resources:
+            requests:
+              cpu: 100m
+              memory: 96Mi
+            limits:
+              cpu: "1"
+              memory: 192Mi

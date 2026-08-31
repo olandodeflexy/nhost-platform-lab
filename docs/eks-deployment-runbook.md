@@ -898,12 +898,14 @@ Create these non-sensitive repository variables:
 | `NONPROD_CLUSTER_NAME` | `nhost-lab-nonprod-eu-west-1` |
 | `PROD_EU_CLUSTER_NAME` | `nhost-lab-prod-eu-west-1` |
 | `PROD_US_CLUSTER_NAME` | `nhost-lab-prod-us-east-1` |
+| `RELEASE_BOT_CLIENT_ID` | GitHub App Client ID |
 
 Install a GitHub App on the repository with the narrowly required permission to
 create releases and tags. Store its credentials as:
 
-- `RELEASE_BOT_APP_ID`;
-- `RELEASE_BOT_PRIVATE_KEY`.
+- non-sensitive repository variable `RELEASE_BOT_CLIENT_ID` containing the
+  App's Client ID, not its legacy numeric App ID;
+- Actions secret `RELEASE_BOT_PRIVATE_KEY` containing the PEM private key.
 
 Do not create AWS access-key secrets. GitHub jobs obtain temporary credentials
 through OIDC.

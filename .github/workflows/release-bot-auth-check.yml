@@ -52,11 +52,61 @@ jobs:
           if ! printf '%s' "$repository_json" | jq -e \
             --arg repository "$EXPECTED_REPOSITORY" '
               .full_name == $repository and
-              .permissions.pull == true and
-              .permissions.push == false and
-              .permissions.admin == false
+              .archived == false and
+              .disabled == false
             ' >/dev/null; then
-            echo "release App smoke-test token is not read-only" >&2
+            echo "release App token cannot read the expected active repository" >&2
+            exit 1
+          fi
+
+          # Creating a Git blob requires Contents: write. This deliberately
+          # invalid request omits required content and uses an unsupported
+          # encoding, so it cannot create an object even if authorization is
+          # unexpectedly granted.
+          set +e
+          probe_response="$(
+            gh api \
+              --method POST \
+              --include \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "repos/${EXPECTED_REPOSITORY}/git/blobs" \
+              -f encoding=unsupported-for-read-only-probe \
+              2>/dev/null
+          )"
+          probe_exit=$?
+          set -e
+
+          probe_status="$(
+            printf '%s\n' "$probe_response" |
+              awk '/^HTTP\// { status = $2 } END { print status }'
+          )"
+          accepted_permissions="$(
+            printf '%s\n' "$probe_response" |
+              awk -F ': *' '
+                tolower($1) == "x-accepted-github-permissions" {
+                  gsub(/\r/, "", $2)
+                  permissions = tolower($2)
+                }
+                END { print permissions }
+              '
+          )"
+          probe_message="$(
+            printf '%s\n' "$probe_response" |
+              awk '
+                body { print }
+                /^\r?$/ { body = 1 }
+              ' |
+              jq -r '.message // empty'
+          )"
+
+          if [[ "$probe_exit" -eq 0 ]] ||
+            [[ "$probe_status" != "403" ]] ||
+            [[ "$accepted_permissions" != *"contents=write"* ]] ||
+            [[ "$probe_message" != "Resource not accessible by integration" ]]; then
+            echo "release App token was not conclusively denied Contents: write" >&2
+            echo "HTTP status: ${probe_status:-missing}" >&2
+            echo "Required permissions: ${accepted_permissions:-missing}" >&2
+            echo "API message: ${probe_message:-missing}" >&2
             exit 1
           fi
 

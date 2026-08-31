@@ -44,11 +44,14 @@ Configure these non-sensitive repository variables:
 | `NONPROD_CLUSTER_NAME` | `nhost-lab-nonprod-eu-west-1` |
 | `PROD_EU_CLUSTER_NAME` | `nhost-lab-prod-eu-west-1` |
 | `PROD_US_CLUSTER_NAME` | `nhost-lab-prod-us-east-1` |
+| `RELEASE_BOT_CLIENT_ID` | GitHub App Client ID |
 
 Install a GitHub App on the repository with permission to create releases. Store
-its credentials as `RELEASE_BOT_APP_ID` and `RELEASE_BOT_PRIVATE_KEY`. The App
-token is intentional: a release created with the workflow's default token does
-not trigger the downstream release workflow.
+its Client ID in the non-sensitive repository variable
+`RELEASE_BOT_CLIENT_ID`, and stream its PEM private key into the Actions secret
+`RELEASE_BOT_PRIVATE_KEY`. Do not use the legacy numeric App ID in the Client ID
+variable. The App token is intentional: a release created with the workflow's
+default token does not trigger the downstream release workflow.
 
 Set the immutable repository identity in `infra/live/github.hcl` before applying
 the OIDC roles. The IDs are public GitHub identifiers, not secrets, and should be

@@ -61,9 +61,23 @@ jobs:
           NHOST_CORE_ACCOUNT_ID="$(printf '%012d' 1)"
           NHOST_NONPROD_ACCOUNT_ID="$(printf '%012d' 2)"
           NHOST_PROD_ACCOUNT_ID="$(printf '%012d' 3)"
+          NHOST_NONPROD_DOMAIN="nonprod.example.com"
+          NHOST_PROD_EU_DOMAIN="eu.example.com"
+          NHOST_PROD_US_DOMAIN="us.example.com"
+          NHOST_NONPROD_ROUTE53_ZONE_ID="Z00000000000000000001"
+          NHOST_PROD_EU_ROUTE53_ZONE_ID="Z00000000000000000002"
+          NHOST_PROD_US_ROUTE53_ZONE_ID="Z00000000000000000003"
+          NHOST_LETSENCRYPT_EMAIL="ci@example.invalid"
           export NHOST_CORE_ACCOUNT_ID
           export NHOST_NONPROD_ACCOUNT_ID
           export NHOST_PROD_ACCOUNT_ID
+          export NHOST_NONPROD_DOMAIN
+          export NHOST_PROD_EU_DOMAIN
+          export NHOST_PROD_US_DOMAIN
+          export NHOST_NONPROD_ROUTE53_ZONE_ID
+          export NHOST_PROD_EU_ROUTE53_ZONE_ID
+          export NHOST_PROD_US_ROUTE53_ZONE_ID
+          export NHOST_LETSENCRYPT_EMAIL
           nix develop --no-update-lock-file --command \
             terragrunt hcl validate --working-dir infra/live
 

@@ -94,9 +94,28 @@ resource "aws_iam_role" "cert_manager" {
 
 data "aws_iam_policy_document" "cert_manager" {
   statement {
-    sid       = "ChangeAuthorizedZones"
+    sid       = "ChangeAuthorizedZoneTxtRecords"
     effect    = "Allow"
     actions   = ["route53:ChangeResourceRecordSets"]
+    resources = var.route53_zone_arns
+
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "route53:ChangeResourceRecordSetsRecordTypes"
+      values   = ["TXT"]
+    }
+
+    condition {
+      test     = "Null"
+      variable = "route53:ChangeResourceRecordSetsRecordTypes"
+      values   = ["false"]
+    }
+  }
+
+  statement {
+    sid       = "ListAuthorizedZoneRecords"
+    effect    = "Allow"
+    actions   = ["route53:ListResourceRecordSets"]
     resources = var.route53_zone_arns
   }
 

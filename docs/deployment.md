@@ -13,17 +13,31 @@ ruleset that prevents force-updating or deleting `demo-api@*` tags, while allowi
 the release GitHub App to create them. These environment rules are part of the
 OIDC boundary, not optional workflow hygiene. Artifact attestations must be
 enabled. They are available for public repositories on current GitHub plans;
-private or internal repositories require GitHub Enterprise Cloud.
+private or internal repositories require GitHub Enterprise Cloud. The current
+self-hosted-runner workflow supports only the latter mode: make the repository
+private/internal, verify the Enterprise attestation capability, and set the
+repository variable `PRIVATE_ATTESTATIONS_SUPPORTED=true`. The workflows fail
+before publishing or scheduling a deployment when either condition is absent.
+Do not set the variable without verifying the capability.
 
 The EKS API endpoints are private. Register ephemeral or tightly managed
-self-hosted runners with network access to each cluster and these labels:
+self-hosted runners only after the repository is private/internal and the
+capability gate above passes. Never register one while this repository is
+public, even if it is JIT or ephemeral. Use network access to each cluster and
+these labels:
 
 - `self-hosted`, `linux`, `nonprod` for the non-production VPC;
 - `self-hosted`, `linux`, `prod-eu-west-1` for the EU production VPC;
 - `self-hosted`, `linux`, `prod-us-east-1` for the US production VPC.
 
 Do not place a long-lived AWS key on those runners. The jobs still obtain their
-AWS identity through GitHub OIDC.
+AWS identity through GitHub OIDC. If GitHub Enterprise Cloud is unavailable,
+keep the repository public and first implement the separately reviewed
+AWS-native VPC executor described in the EKS runbook; the intended option is a
+narrowly scoped CodeBuild project invoked from a GitHub-hosted job. That path is
+not implemented yet. A public repository with a self-hosted runner and a
+private GitHub Free/Pro/Team repository with the current attestation step are
+both unsupported.
 
 Store account IDs as protected GitHub Environment secrets. AWS account IDs are
 identifiers rather than credentials, but using environment secrets makes log
@@ -45,6 +59,7 @@ Configure these non-sensitive repository variables:
 | `PROD_EU_CLUSTER_NAME` | `nhost-lab-prod-eu-west-1` |
 | `PROD_US_CLUSTER_NAME` | `nhost-lab-prod-us-east-1` |
 | `RELEASE_BOT_CLIENT_ID` | GitHub App Client ID |
+| `PRIVATE_ATTESTATIONS_SUPPORTED` | `true` only after verifying private-repository support |
 
 Install a GitHub App on the repository with permission to create releases. Store
 its Client ID in the non-sensitive repository variable
@@ -106,7 +121,8 @@ roles before EKS because the cluster configuration grants them access by ARN.
 
 ## Release
 
-1. Merge ordinary changes only after `ci.yml` succeeds.
+1. Verify the supported-delivery capability gate, then merge ordinary changes
+   only after `ci.yml` succeeds.
 2. Open a final pull request titled `release(demo-api): 1.2.3`.
 3. Merging that pull request creates tag and release `demo-api@1.2.3`.
 4. `demo-api-release.yml` runs Nix checks, builds the image once, pushes it to
@@ -130,11 +146,12 @@ release workflow intentionally has no manual-dispatch path; re-run its existing
 release-event workflow run if infrastructure failure requires a retry.
 
 Account-ID masking protects workflow logs, but the successful non-production
-attestation intentionally names the fully qualified ECR image. Because this is a
-public repository, that signed attestation is public and its subject includes the
-ECR registry account ID. AWS account IDs are not authentication credentials. If
-the registry identity must nevertheless remain confidential, use a private
-attestation/repository design instead of this public provenance workflow.
+attestation intentionally names the fully qualified ECR image, so its subject
+includes the ECR registry account ID. AWS account IDs are not authentication
+credentials. The current Enterprise/private mode keeps the repository-scoped
+attestation private; a future public-source/AWS-executor mode would make that
+signed subject public. If policy treats the registry identifier as confidential,
+use only the private Enterprise mode or redesign the provenance subject.
 
 The core registry root pre-creates immutable `demo-api` repositories in
 `eu-west-1` and `us-east-1`, applies the same pull and lifecycle policies, and

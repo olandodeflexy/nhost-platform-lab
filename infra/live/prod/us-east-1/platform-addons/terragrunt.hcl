@@ -39,9 +39,9 @@ inputs = merge(include.root.inputs, {
   karpenter_queue_name               = dependency.eks.outputs.karpenter_queue_name
   karpenter_node_role_name           = dependency.eks.outputs.karpenter_node_role_name
   karpenter_ami_alias                = get_env("KARPENTER_AMI_ALIAS", "al2023@latest")
-  domain_filters                     = ["us.example.com"]
-  route53_zone_arns                  = ["arn:aws:route53:::hostedzone/REPLACE_ME"]
-  letsencrypt_email                  = "replace-me@example.com"
+  domain_filters                     = [get_env("NHOST_PROD_US_DOMAIN")]
+  route53_zone_arns                  = ["arn:aws:route53:::hostedzone/${get_env("NHOST_PROD_US_ROUTE53_ZONE_ID")}"]
+  letsencrypt_email                  = get_env("NHOST_LETSENCRYPT_EMAIL")
   workload_namespace                 = "demo-api"
   deployment_kubernetes_groups       = ["nhost-platform-lab:demo-api-deployers"]
 })

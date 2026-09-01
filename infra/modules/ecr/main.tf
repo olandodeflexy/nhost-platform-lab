@@ -91,6 +91,11 @@ resource "aws_ecr_lifecycle_policy" "replica" {
 data "aws_iam_policy_document" "cross_account_pull" {
   count = local.has_cross_account_readers ? 1 : 0
 
+  # ECR scopes this document to the repository on which it is installed.
+  # Keep Resource omitted: SetRepositoryPolicy rejects Resource = "*" for
+  # these role-constrained statements even though generic IAM validation
+  # expects resource policies to include it.
+
   dynamic "statement" {
     for_each = length(var.pull_role_arns) > 0 ? [1] : []
 
@@ -108,7 +113,6 @@ data "aws_iam_policy_document" "cross_account_pull" {
         "ecr:BatchGetImage",
         "ecr:GetDownloadUrlForLayer",
       ]
-      resources = ["*"]
 
       condition {
         test     = "ArnEquals"
@@ -136,7 +140,6 @@ data "aws_iam_policy_document" "cross_account_pull" {
         "ecr:DescribeImages",
         "ecr:GetDownloadUrlForLayer",
       ]
-      resources = ["*"]
 
       condition {
         test     = "ArnEquals"

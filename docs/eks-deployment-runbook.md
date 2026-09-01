@@ -512,7 +512,30 @@ their parent domains:
 With the current Pod Identity policies, external-dns and cert-manager expect the
 zones to be in the same account as their cluster. Put each zone ARN, its domain
 filter, and the real certificate contact email in the corresponding
-`platform-addons` root.
+`platform-addons` deployment inputs. Keep the contact email and hosted-zone IDs
+out of Git by exporting them locally:
+
+```bash
+export NHOST_NONPROD_DOMAIN='nonprod.<domain-you-own>'
+export NHOST_PROD_EU_DOMAIN='eu.<domain-you-own>'
+export NHOST_PROD_US_DOMAIN='us.<domain-you-own>'
+export NHOST_NONPROD_ROUTE53_ZONE_ID='Z...'
+export NHOST_PROD_EU_ROUTE53_ZONE_ID='Z...'
+export NHOST_PROD_US_ROUTE53_ZONE_ID='Z...'
+export NHOST_LETSENCRYPT_EMAIL='<real-contact-email>'
+```
+
+One real contact email can be reused for all issuers; three email addresses are
+not required. Do not commit a personal mailbox address. The production zone
+variables can remain unset while doing a nonprod-only screenshot deployment.
+The live roots have no deployable fallback values: a missing environment value
+stops Terragrunt before planning, and Terraform rejects reserved example/test
+domains or malformed hosted-zone ARNs.
+
+For the lowest-cost first deployment, delegate one
+`nonprod.<domain-you-own>` public zone to the nonprod account and use
+`demo-api.nonprod.<domain-you-own>` in both the nonprod domain filter and
+Kustomize ingress overlay. Defer both production zones and clusters.
 
 Verify each zone and independently verify parent delegation:
 
@@ -529,10 +552,20 @@ test it in nonprod, record the evidence, and export it before production add-on
 plans:
 
 ```bash
+AWS_PROFILE="${NHOST_NONPROD_PROFILE}" aws ssm get-parameter \
+  --region eu-west-1 \
+  --name /aws/service/eks/optimized-ami/1.34/amazon-linux-2023/x86_64/standard/recommended/release_version \
+  --query Parameter.Value \
+  --output text
+
 export KARPENTER_AMI_ALIAS='al2023@vYYYYMMDD'
 ```
 
-The value above is a format marker, not an AMI recommendation.
+Convert the date suffix from the returned release, for example
+`1.34.x-YYYYMMDD`, to `al2023@vYYYYMMDD`. Confirm the same dated release exists
+in every target region. The exported value above is a format marker, not an AMI
+recommendation. Both nonprod and production live roots accept this environment
+variable; test the exact value in nonprod before using it in production.
 
 ## Phase 4: establish private EKS API access
 
@@ -542,7 +575,8 @@ can be created from an authenticated workstation, but `kubectl`, Helm, and the
 
 Provision one of these reviewed access paths before the add-on phase:
 
-- an ephemeral or tightly managed EC2 runner reached through SSM;
+- after making the repository private, a clean-image, repository-scoped,
+  one-job EC2 runner reached through SSM;
 - a VPN-connected operator workstation;
 - a connected build network through peering or Transit Gateway;
 - another private execution environment with equivalent controls.
@@ -555,10 +589,28 @@ The execution environment requires:
 - HTTPS egress to AWS APIs and the public Helm/OCI sources used by the module;
 - the pinned Nix toolchain and a clean checkout of the approved commit.
 
-The repository does not provision VPN, peering, Transit Gateway, runners, or a
-runner-to-cluster security-group rule. Represent the TCP/443 rule in Terraform,
-scoped to the runner security-group ID. Do not create an untracked console rule
-or allow `0.0.0.0/0`.
+Each EKS root creates a dedicated `private_runner_security_group_id` with no
+inbound rules and only TCP/443 IPv4 egress, and permits TCP/443 to the private
+endpoint from that exact security group. Owning the source group and endpoint
+rule in one Terraform state makes their lifecycle explicit.
+
+The repository does not provision VPN, peering, Transit Gateway, or a runner.
+Attach the matching regional runner security group when provisioning the
+private host. Do not create an untracked console rule, add SSH ingress, or use a
+CIDR-wide cluster rule. Reach an EC2 runner through SSM instead.
+
+The account `terraform-deploy` policies intentionally do not grant direct
+`ec2:RunInstances`, instance termination, or general `iam:PassRole`. Provision
+runner compute only through a separately reviewed module and least-privilege
+policy change. Do not install a GitHub runner on controller or Karpenter worker
+nodes.
+
+GitHub advises against self-hosted runners for public repositories. Ephemeral
+or JIT registration limits persistence but does not prove that the trusted
+deployment job will claim the runner before an untrusted fork-originated job.
+Make this repository private before registering any runner. Repository
+visibility may be reconsidered only after the runner is deregistered,
+terminated, wiped, and its logs and workflow artifacts are reviewed.
 
 **Gate:** Do not apply any `platform-addons` root until the private host resolves
 the cluster endpoint, reaches TCP/443, and authenticates as `platform-admin`.
@@ -660,8 +712,14 @@ terragrunt output private_subnet_ids
 terragrunt output intra_subnet_ids
 ```
 
-**Gate:** Confirm the expected CIDR, three AZs, route/NAT design, flow logs, and
-subnet roles before creating EKS.
+The shared default network ACL is deliberately an explicit IPv4 allow-all ACL.
+It is stateless and cannot replace the stateful security-group boundary; an
+empty managed ACL would deny NAT return traffic, EKS control-plane traffic,
+nodes, and private runners.
+
+**Gate:** Confirm the expected CIDR, three AZs, route/NAT design, flow logs,
+permissive shared ACL, restrictive default security group, and subnet roles
+before creating EKS.
 
 ### 5.4 Create EKS
 
@@ -677,11 +735,16 @@ infra/live/prod/us-east-1/eks
 For the first deployment, apply only nonprod. The module creates:
 
 - Kubernetes 1.34 with private-only API access;
+- TCP/443 private-endpoint access from only the matching runner security group;
 - API-based access entries, KMS encryption, and control-plane logging;
 - a controller managed node group;
 - Karpenter IAM, queue, and interruption resources;
 - VPC CNI, CoreDNS, kube-proxy, Pod Identity Agent, and EBS CSI add-ons;
 - an EBS CSI Pod Identity role.
+
+The EKS and VPC registry modules are pinned to the exact reviewed versions in
+source. Do not widen those constraints during a deployment; upgrade them in a
+separate pull request with a fresh plan and regression validation.
 
 Before planning, verify that Kubernetes 1.34 remains supported in the target
 regions and schedule the next minor-version test before its standard-support
@@ -698,8 +761,15 @@ terragrunt output cluster_name
 terragrunt output cluster_arn
 terragrunt output cluster_security_group_id
 terragrunt output node_security_group_id
+terragrunt output private_runner_security_group_id
 terragrunt output karpenter_node_role_arn
 ```
+
+Confirm the private-runner group has no ingress and only TCP/443 IPv4 egress,
+and that the cluster security group accepts TCP/443 from that group only.
+Confirm `karpenter.sh/discovery` is present on the shared node security group but
+absent from the cluster and private-runner groups; otherwise Karpenter would
+attach an unintended security group to new workers.
 
 Do not continue if the cluster is not `ACTIVE`, nodes cannot join, an access
 entry is missing, an add-on is degraded, or the private operator path is absent.
@@ -874,8 +944,27 @@ tag ruleset that prevents force-updating or deleting `demo-api@*`, while
 permitting the release GitHub App to create those tags.
 
 Enable artifact attestations. Public repositories can use them on current
-GitHub plans; private or internal repositories require the applicable GitHub
-Enterprise Cloud capability.
+GitHub plans; private or internal repositories require GitHub Enterprise Cloud.
+This creates an explicit deployment-mode gate: do not register this repository's
+self-hosted runners while it is public, and do not claim that the current
+attestation-backed promotion workflow works in a private repository unless the
+Enterprise capability is present.
+
+For the current self-hosted-runner design, first verify the private repository's
+artifact-attestation capability and then set the repository variable
+`PRIVATE_ATTESTATIONS_SUPPORTED=true`. Both release workflows fail on a public
+repository or when this explicit confirmation is absent, before publishing or
+queuing a privileged deployment job. Never set the variable merely to bypass
+the gate.
+
+If GitHub Enterprise Cloud is not available, the supported lower-cost redesign
+is to keep the source repository public, execute private-cluster operations in
+an AWS-native VPC executor such as a narrowly scoped CodeBuild project, and
+return only the verified result to a GitHub-hosted job that creates the public
+attestation. That executor and its IAM/EKS access are not implemented by this
+repository yet and require a separate reviewed change. A public repository plus
+a self-hosted GitHub runner, or a private GitHub Free/Pro/Team repository plus
+the current attestation step, is not a deployable full-workflow configuration.
 
 ### 7.2 Configure protected identifiers, variables, and release credentials
 
@@ -899,6 +988,7 @@ Create these non-sensitive repository variables:
 | `PROD_EU_CLUSTER_NAME` | `nhost-lab-prod-eu-west-1` |
 | `PROD_US_CLUSTER_NAME` | `nhost-lab-prod-us-east-1` |
 | `RELEASE_BOT_CLIENT_ID` | GitHub App Client ID |
+| `PRIVATE_ATTESTATIONS_SUPPORTED` | `true` only after verifying private-repository support |
 
 Install a GitHub App on the repository with the narrowly required permission to
 create releases and tags. Store its credentials as:
@@ -918,11 +1008,13 @@ Terraform plan output with real deployment values. Plans, state, and CLI errors
 can contain ARNs, bucket names, network IDs, endpoints, and other account
 metadata even when no secret value is present.
 
-The public non-production attestation still names the fully qualified ECR image
-so that production can verify the deployed artifact. Its subject therefore
-publishes the registry account ID as non-secret metadata. If organizational
-policy treats that identifier as confidential, redesign the provenance flow or
-use a private repository before enabling releases.
+The non-production attestation names the fully qualified ECR image so that
+production can verify the deployed artifact. Its subject therefore contains the
+registry account ID as non-secret metadata. It remains repository-private under
+the current Enterprise/self-hosted-runner mode; it would be public under the
+documented public-source/AWS-executor alternative. If organizational policy
+treats the identifier as confidential, use only the private mode or redesign the
+provenance subject before enabling releases.
 
 Application secrets are also prohibited in Kustomize, Terraform variables,
 GitHub variables, and state outputs. A real application should retrieve them
@@ -931,15 +1023,33 @@ using EKS Pod Identity.
 
 ### 7.3 Register private runners
 
-Register ephemeral or tightly managed self-hosted Linux runners with private
-connectivity and these exact labels:
+This section applies only when GitHub Enterprise Cloud supports artifact
+attestations for the private repository and the capability gate in section 7.1
+has passed. Otherwise implement and review the AWS-native executor path before
+continuing.
+
+First make the repository private and verify that visibility through the GitHub
+API. Do not register a self-hosted runner while the repository is public; JIT
+or ephemeral lifecycle is not a substitute for this provenance boundary. Once
+private, use only repository-scoped, clean-image, one-job ephemeral or
+just-in-time Linux runners with private connectivity and these exact labels:
 
 - `self-hosted`, `linux`, `nonprod`;
 - `self-hosted`, `linux`, `prod-eu-west-1`;
 - `self-hosted`, `linux`, `prod-us-east-1`.
 
+Attach only the `private_runner_security_group_id` output from the matching
+regional EKS root. Place the runner in a private subnet with NAT egress,
+manage it through SSM, and do not add inbound security-group rules. Verify from
+the runner that the cluster endpoint resolves to private addresses and that
+TCP/443 succeeds before registering it with GitHub.
+
 Restrict runner groups to this repository, patch runner images, prevent
-credential persistence, and replace runners after untrusted or failed jobs.
+credential persistence, forward runner diagnostic logs to external storage,
+and deregister, terminate, and wipe the instance immediately after its single
+job. Never register a persistent runner. Review logs, artifacts, and workflow
+stdout for disclosure before deciding whether to make the repository public
+again.
 
 ### 7.4 Verify ECR repositories and replication
 
@@ -1054,4 +1164,10 @@ Attach these artifacts to the deployment record:
 - [Amazon EKS access entries](https://docs.aws.amazon.com/eks/latest/userguide/access-entries.html)
 - [Amazon EBS CSI driver](https://docs.aws.amazon.com/eks/latest/userguide/ebs-csi.html)
 - [Amazon EKS Kubernetes version lifecycle](https://docs.aws.amazon.com/eks/latest/userguide/kubernetes-versions.html)
+- [Amazon VPC network ACLs](https://docs.aws.amazon.com/vpc/latest/userguide/vpc-network-acls.html)
+- [Karpenter AMI aliases](https://karpenter.sh/docs/concepts/nodeclasses/#specamiselectorterms)
+- [cert-manager Route53 DNS-01 policy](https://cert-manager.io/docs/configuration/acme/dns01/route53/)
 - [GitHub Actions OIDC reference](https://docs.github.com/en/actions/reference/security/oidc)
+- [GitHub artifact-attestation availability](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations)
+- [GitHub self-hosted runner security](https://docs.github.com/en/actions/reference/security/secure-use#hardening-for-self-hosted-runners)
+- [GitHub ephemeral runners](https://docs.github.com/en/actions/reference/runners/self-hosted-runners#ephemeral-runners-for-autoscaling)

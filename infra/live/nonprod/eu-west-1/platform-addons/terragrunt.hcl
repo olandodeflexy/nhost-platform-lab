@@ -42,10 +42,10 @@ inputs = merge(include.root.inputs, {
   cluster_access_role_arn            = "arn:aws:iam::${local.account.account_id}:role/platform-admin"
   karpenter_queue_name               = dependency.eks.outputs.karpenter_queue_name
   karpenter_node_role_name           = dependency.eks.outputs.karpenter_node_role_name
-  karpenter_ami_alias                = "al2023@latest"
-  domain_filters                     = ["nonprod.example.com"]
-  route53_zone_arns                  = ["arn:aws:route53:::hostedzone/REPLACE_ME"]
-  letsencrypt_email                  = "replace-me@example.com"
+  karpenter_ami_alias                = get_env("KARPENTER_AMI_ALIAS", "al2023@latest")
+  domain_filters                     = [get_env("NHOST_NONPROD_DOMAIN")]
+  route53_zone_arns                  = ["arn:aws:route53:::hostedzone/${get_env("NHOST_NONPROD_ROUTE53_ZONE_ID")}"]
+  letsencrypt_email                  = get_env("NHOST_LETSENCRYPT_EMAIL")
   workload_namespace                 = "demo-api"
   deployment_kubernetes_groups       = ["nhost-platform-lab:demo-api-deployers"]
 })

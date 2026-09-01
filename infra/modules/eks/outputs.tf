@@ -29,6 +29,11 @@ output "node_security_group_id" {
   value       = module.eks.node_security_group_id
 }
 
+output "private_runner_security_group_id" {
+  description = "Security group to attach to private execution hosts that need EKS API access."
+  value       = aws_security_group.private_runner.id
+}
+
 output "oidc_provider_arn" {
   description = "EKS OIDC provider ARN for workloads that still require IRSA."
   value       = module.eks.oidc_provider_arn

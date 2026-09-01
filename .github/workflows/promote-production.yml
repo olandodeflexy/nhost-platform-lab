@@ -26,6 +26,30 @@ jobs:
       version: ${{ steps.inputs.outputs.version }}
 
     steps:
+      - name: Require a supported private delivery mode
+        env:
+          PRIVATE_ATTESTATIONS_SUPPORTED: ${{ vars.PRIVATE_ATTESTATIONS_SUPPORTED }}
+          REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$REPOSITORY_VISIBILITY" in
+            private|internal)
+              ;;
+            public)
+              echo "production promotion is blocked: never attach a private EKS runner to a public repository" >&2
+              exit 1
+              ;;
+            *)
+              echo "production promotion is blocked: unrecognized repository visibility" >&2
+              exit 1
+              ;;
+          esac
+          if [ "$PRIVATE_ATTESTATIONS_SUPPORTED" != "true" ]; then
+            echo "production promotion is blocked: confirm private-repository artifact attestation support and set PRIVATE_ATTESTATIONS_SUPPORTED=true" >&2
+            exit 1
+          fi
+
       - name: Validate release version
         id: inputs
         env:

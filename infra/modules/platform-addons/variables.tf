@@ -72,8 +72,12 @@ variable "domain_filters" {
   default     = []
 
   validation {
-    condition     = length(var.domain_filters) > 0
-    error_message = "At least one external-dns domain filter is required."
+    condition = length(var.domain_filters) > 0 && alltrue([
+      for domain in var.domain_filters :
+      can(regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$", lower(trimspace(domain)))) &&
+      !can(regex("(^|\\.)example\\.(com|net|org)$|\\.(invalid|test)$", lower(trimspace(domain))))
+    ])
+    error_message = "domain_filters must contain real DNS suffixes, not reserved example or test domains."
   }
 }
 
@@ -83,18 +87,25 @@ variable "route53_zone_arns" {
   default     = []
 
   validation {
-    condition     = length(var.route53_zone_arns) > 0
-    error_message = "At least one Route 53 hosted-zone ARN is required."
+    condition = length(var.route53_zone_arns) > 0 && alltrue([
+      for zone_arn in var.route53_zone_arns :
+      can(regex("^arn:aws:route53:::hostedzone/[A-Z0-9]+$", zone_arn))
+    ])
+    error_message = "route53_zone_arns must contain valid commercial-partition Route 53 hosted-zone ARNs."
   }
 }
 
 variable "letsencrypt_email" {
   description = "Email used for Let's Encrypt expiry and account notices."
   type        = string
+  sensitive   = true
 
   validation {
-    condition     = can(regex("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$", var.letsencrypt_email))
-    error_message = "letsencrypt_email must be a valid email address."
+    condition = (
+      can(regex("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$", var.letsencrypt_email)) &&
+      !can(regex("@example\\.(com|net|org|invalid)$", lower(var.letsencrypt_email)))
+    )
+    error_message = "letsencrypt_email must be a real contact address, not a reserved example address."
   }
 }
 

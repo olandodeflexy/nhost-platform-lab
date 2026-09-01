@@ -14,7 +14,39 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  delivery-capability:
+    if: startsWith(github.event.release.tag_name, 'demo-api@')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Require a supported private delivery mode
+        env:
+          PRIVATE_ATTESTATIONS_SUPPORTED: ${{ vars.PRIVATE_ATTESTATIONS_SUPPORTED }}
+          REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$REPOSITORY_VISIBILITY" in
+            private|internal)
+              ;;
+            public)
+              echo "release deployment is blocked: never attach the private EKS runner to a public repository" >&2
+              exit 1
+              ;;
+            *)
+              echo "release deployment is blocked: unrecognized repository visibility" >&2
+              exit 1
+              ;;
+          esac
+          if [ "$PRIVATE_ATTESTATIONS_SUPPORTED" != "true" ]; then
+            echo "release deployment is blocked: confirm private-repository artifact attestation support and set PRIVATE_ATTESTATIONS_SUPPORTED=true" >&2
+            exit 1
+          fi
+
   build-publish:
+    needs:
+      - delivery-capability
     if: startsWith(github.event.release.tag_name, 'demo-api@')
     runs-on: ubuntu-24.04
     environment: release

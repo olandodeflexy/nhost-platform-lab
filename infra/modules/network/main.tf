@@ -30,7 +30,7 @@ locals {
 
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
-  version = "~> 6.0"
+  version = "6.7.2"
 
   name = local.name
   cidr = var.vpc_cidr
@@ -57,9 +57,30 @@ module "vpc" {
   vpc_flow_log_iam_policy_name                    = "${local.name}-flow-log-to-cloudwatch"
   vpc_flow_log_iam_policy_use_name_prefix         = false
 
-  manage_default_network_acl     = true
-  default_network_acl_ingress    = []
-  default_network_acl_egress     = []
+  # Network ACLs are stateless. Keep the shared default ACL permissive and use
+  # security groups as the stateful traffic boundary for these subnets. An
+  # empty managed ACL would deny all NAT, EKS, node, and runner traffic.
+  manage_default_network_acl = true
+  default_network_acl_ingress = [
+    {
+      rule_no    = 100
+      action     = "allow"
+      from_port  = 0
+      to_port    = 0
+      protocol   = "-1"
+      cidr_block = "0.0.0.0/0"
+    },
+  ]
+  default_network_acl_egress = [
+    {
+      rule_no    = 100
+      action     = "allow"
+      from_port  = 0
+      to_port    = 0
+      protocol   = "-1"
+      cidr_block = "0.0.0.0/0"
+    },
+  ]
   manage_default_route_table     = true
   default_route_table_routes     = []
   manage_default_security_group  = true

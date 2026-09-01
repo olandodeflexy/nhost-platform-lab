@@ -2,10 +2,9 @@ provider "aws" {
   region = var.aws_region
 
   default_tags {
-    tags = merge(var.tags, {
-      Environment = var.environment
-      ManagedBy   = "Terraform"
-      Project     = var.project
+    tags = merge(local.base_tags, {
+      ManagedBy = "Terraform"
+      Project   = var.project
     })
   }
 }
@@ -13,9 +12,19 @@ provider "aws" {
 data "aws_partition" "current" {}
 
 locals {
-  tags = merge(var.tags, {
-    Environment              = var.environment
-    "karpenter.sh/discovery" = var.cluster_name
+  base_tags = merge(
+    {
+      for key, value in var.tags : key => value
+      if key != "karpenter.sh/discovery"
+    },
+    {
+      Environment = var.environment
+    },
+  )
+
+  private_runner_tags = merge(local.base_tags, {
+    Name    = "${var.cluster_name}-private-runner"
+    Purpose = "private-eks-api-access"
   })
 
   admin_access_entries = {
@@ -51,6 +60,13 @@ locals {
   access_entries = merge(local.admin_access_entries, local.deployment_access_entries)
 }
 
+check "private_runner_not_discovered_by_karpenter" {
+  assert {
+    condition     = lookup(local.private_runner_tags, "karpenter.sh/discovery", null) == null
+    error_message = "The private-runner security group must not carry the Karpenter discovery tag."
+  }
+}
+
 resource "terraform_data" "access_configuration_guard" {
   input = {
     admin_principal_arns      = var.admin_principal_arns
@@ -68,6 +84,27 @@ resource "terraform_data" "access_configuration_guard" {
       error_message = "deployment_namespaces must contain at least one namespace when deployment principals are configured."
     }
   }
+}
+
+resource "aws_security_group" "private_runner" {
+  name                   = "${var.cluster_name}-private-runner"
+  description            = "Private execution hosts approved to reach the EKS API"
+  vpc_id                 = var.vpc_id
+  revoke_rules_on_delete = true
+
+  # The EC2NodeClass selects every group with karpenter.sh/discovery, so this
+  # source identity deliberately uses the sanitized, non-discovery tag set.
+  tags = local.private_runner_tags
+}
+
+resource "aws_vpc_security_group_egress_rule" "private_runner_https" {
+  security_group_id = aws_security_group.private_runner.id
+  description       = "HTTPS to the private EKS endpoint and required external services"
+
+  ip_protocol = "tcp"
+  from_port   = 443
+  to_port     = 443
+  cidr_ipv4   = "0.0.0.0/0"
 }
 
 data "aws_iam_policy_document" "ebs_csi_pod_identity" {
@@ -98,7 +135,7 @@ resource "aws_iam_role" "ebs_csi" {
   name               = "${var.cluster_name}-ebs-csi"
   assume_role_policy = data.aws_iam_policy_document.ebs_csi_pod_identity.json
 
-  tags = merge(local.tags, {
+  tags = merge(local.base_tags, {
     "eks-cluster-name" = var.cluster_name
   })
 }
@@ -110,7 +147,7 @@ resource "aws_iam_role_policy_attachment" "ebs_csi" {
 
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
-  version = "~> 21.0"
+  version = "21.25.0"
 
   name               = var.cluster_name
   kubernetes_version = var.kubernetes_version
@@ -126,6 +163,17 @@ module "eks" {
   endpoint_private_access      = true
   endpoint_public_access       = var.endpoint_public_access
   endpoint_public_access_cidrs = var.endpoint_public_access_cidrs
+
+  security_group_additional_rules = {
+    ingress_private_runner_https = {
+      description              = "HTTPS from an approved private execution security group"
+      protocol                 = "tcp"
+      from_port                = 443
+      to_port                  = 443
+      type                     = "ingress"
+      source_security_group_id = aws_security_group.private_runner.id
+    }
+  }
 
   vpc_id                   = var.vpc_id
   subnet_ids               = var.private_subnet_ids
@@ -217,8 +265,12 @@ module "eks" {
     }
   }
 
+  node_security_group_tags = {
+    "karpenter.sh/discovery" = var.cluster_name
+  }
+
   deletion_protection = var.environment == "prod"
-  tags                = local.tags
+  tags                = local.base_tags
 
   depends_on = [
     aws_iam_role_policy_attachment.ebs_csi,
@@ -228,7 +280,7 @@ module "eks" {
 
 module "karpenter" {
   source  = "terraform-aws-modules/eks/aws//modules/karpenter"
-  version = "~> 21.0"
+  version = "21.25.0"
 
   cluster_name                    = module.eks.cluster_name
   create_pod_identity_association = true
@@ -247,5 +299,5 @@ module "karpenter" {
     AmazonSSMManagedInstanceCore = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
   }
 
-  tags = local.tags
+  tags = local.base_tags
 }

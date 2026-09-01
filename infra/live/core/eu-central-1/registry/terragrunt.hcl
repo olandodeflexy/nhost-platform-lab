@@ -24,7 +24,10 @@ inputs = merge(include.root.inputs, {
     "arn:aws:iam::${local.prod_account.account_id}:role/nhost-lab-prod-us-east-1-karpenter-node",
   ]
   promotion_reader_role_arns = [
+    "arn:aws:iam::${local.nonprod_account.account_id}:role/nhost-lab-nonprod-eu-west-1-demo-api-deploy-service",
     "arn:aws:iam::${local.prod_account.account_id}:role/github-actions-nhost-platform-lab-deploy",
+    "arn:aws:iam::${local.prod_account.account_id}:role/nhost-lab-prod-eu-west-1-demo-api-deploy-service",
+    "arn:aws:iam::${local.prod_account.account_id}:role/nhost-lab-prod-us-east-1-demo-api-deploy-service",
   ]
   replication_regions = [
     "eu-west-1",

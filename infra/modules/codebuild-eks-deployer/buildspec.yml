@@ -1,0 +1,177 @@
+version: 0.2
+
+env:
+  shell: bash
+  exported-variables:
+    - DEPLOYED_COMMIT
+    - DEPLOYED_DIGEST
+    - DEPLOYED_TAG
+
+phases:
+  install:
+    commands:
+      - |
+        set -euo pipefail
+        install_dir="$(mktemp -d)"
+        trap 'rm -rf "$install_dir"' EXIT
+
+        kubectl_version="v1.34.11"
+        kubectl_sha256="8efbb9435132a190920eb65a47a8c1ecf755ad85ab57a600c9bedbab460bb7a8"
+        curl --fail --silent --show-error --location --retry 3 --connect-timeout 10 --max-time 120 \
+          "https://dl.k8s.io/release/${kubectl_version}/bin/linux/amd64/kubectl" \
+          --output "$install_dir/kubectl"
+        printf '%s  %s\n' "$kubectl_sha256" "$install_dir/kubectl" | sha256sum --check --status
+        install -m 0755 "$install_dir/kubectl" /usr/local/bin/kubectl
+
+        kustomize_version="v5.8.1"
+        kustomize_sha256="029a7f0f4e1932c52a0476cf02a0fd855c0bb85694b82c338fc648dcb53a819d"
+        kustomize_archive="$install_dir/kustomize.tar.gz"
+        curl --fail --silent --show-error --location --retry 3 --connect-timeout 10 --max-time 120 \
+          "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${kustomize_version}/kustomize_${kustomize_version}_linux_amd64.tar.gz" \
+          --output "$kustomize_archive"
+        printf '%s  %s\n' "$kustomize_sha256" "$kustomize_archive" | sha256sum --check --status
+        tar -xzf "$kustomize_archive" -C "$install_dir" kustomize
+        install -m 0755 "$install_dir/kustomize" /usr/local/bin/kustomize
+
+        kubectl version --client=true
+        kustomize version
+
+  build:
+    commands:
+      - |
+        set -euo pipefail
+        : "${RELEASE_TAG:?RELEASE_TAG is required}"
+        : "${RELEASE_COMMIT:?RELEASE_COMMIT is required}"
+        : "${EXPECTED_DIGEST:?EXPECTED_DIGEST is required}"
+        : "${CLUSTER_NAME:?CLUSTER_NAME is fixed by the project}"
+        : "${IMAGE_REGISTRY_ID:?IMAGE_REGISTRY_ID is fixed by the project}"
+        : "${IMAGE_REPOSITORY_NAME:?IMAGE_REPOSITORY_NAME is fixed by the project}"
+        : "${IMAGE_URI:?IMAGE_URI is fixed by the project}"
+        : "${REPOSITORY_CLONE_URL:?REPOSITORY_CLONE_URL is fixed by the project}"
+        : "${TARGET_NAMESPACE:?TARGET_NAMESPACE is fixed by the project}"
+        : "${TARGET_OVERLAY:?TARGET_OVERLAY is fixed by the project}"
+        : "${TARGET_REGION:?TARGET_REGION is fixed by the project}"
+
+        if [[ ! "$RELEASE_TAG" =~ ^demo-api@([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+          echo "release tag must be demo-api@X.Y.Z" >&2
+          exit 2
+        fi
+        release_version="${BASH_REMATCH[1]}"
+        if [[ ! "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+          echo "release commit must be a full Git object ID" >&2
+          exit 2
+        fi
+        if [[ ! "$EXPECTED_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+          echo "image digest must be a sha256 digest" >&2
+          exit 2
+        fi
+
+        release_dir="$(mktemp -d)"
+        render_dir="$(mktemp -d)"
+        kubeconfig="$render_dir/kubeconfig"
+        cleanup() {
+          rm -rf "$release_dir" "$render_dir"
+        }
+        trap cleanup EXIT
+
+        export GIT_TERMINAL_PROMPT=0
+        timeout --foreground 30s git -C "$release_dir" init --quiet
+        git -C "$release_dir" remote add origin "$REPOSITORY_CLONE_URL"
+        timeout --foreground 2m git -C "$release_dir" fetch --quiet --depth=1 origin \
+          "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+        tag_commit="$(git -C "$release_dir" rev-parse "${RELEASE_TAG}^{commit}")"
+        if [ "$tag_commit" != "$RELEASE_COMMIT" ]; then
+          echo "release tag does not resolve to the requested immutable commit" >&2
+          exit 1
+        fi
+        git -C "$release_dir" checkout --quiet --detach "$tag_commit"
+        actual_commit="$(git -C "$release_dir" rev-parse HEAD)"
+        if [ "$actual_commit" != "$RELEASE_COMMIT" ]; then
+          echo "fetched release commit does not match the requested immutable commit" >&2
+          exit 1
+        fi
+
+        resolved_digest=""
+        for _ in $(seq 1 60); do
+          resolved_digest="$(aws ecr describe-images \
+            --registry-id "$IMAGE_REGISTRY_ID" \
+            --repository-name "$IMAGE_REPOSITORY_NAME" \
+            --image-ids "imageTag=$release_version" \
+            --region "$TARGET_REGION" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text 2>/dev/null || true)"
+          if [ "$resolved_digest" = "$EXPECTED_DIGEST" ]; then
+            break
+          fi
+          if [[ "$resolved_digest" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo "regional ECR version tag resolved to an unexpected digest" >&2
+            exit 1
+          fi
+          sleep 10
+        done
+        if [ "$resolved_digest" != "$EXPECTED_DIGEST" ]; then
+          echo "regional ECR replica did not expose the expected immutable digest in time" >&2
+          exit 1
+        fi
+
+        if [ ! -d "$release_dir/deploy/kustomize/overlays/$TARGET_OVERLAY" ]; then
+          echo "release does not contain the fixed deployment overlay" >&2
+          exit 1
+        fi
+        cp -R "$release_dir/deploy/kustomize" "$render_dir/kustomize"
+        cd "$render_dir/kustomize/overlays/$TARGET_OVERLAY"
+        kustomize edit set image "demo-api=${IMAGE_URI}@${EXPECTED_DIGEST}"
+        kustomize build . >"$render_dir/rendered.yaml"
+
+        expected_image="${IMAGE_URI}@${EXPECTED_DIGEST}"
+        rendered_images="$(awk '$1 == "image:" { print $2 }' "$render_dir/rendered.yaml")"
+        if [ "$rendered_images" != "$expected_image" ]; then
+          echo "rendered workload must contain exactly the expected demo-api image" >&2
+          exit 1
+        fi
+        if awk -v namespace="$TARGET_NAMESPACE" '$1 == "namespace:" && $2 != namespace { found=1 } END { exit !found }' "$render_dir/rendered.yaml"; then
+          echo "rendered workload contains a resource outside the fixed namespace" >&2
+          exit 1
+        fi
+
+        export KUBECONFIG="$kubeconfig"
+        aws eks update-kubeconfig \
+          --name "$CLUSTER_NAME" \
+          --region "$TARGET_REGION" \
+          --kubeconfig "$kubeconfig" \
+          --alias "$CLUSTER_NAME" \
+          --user-alias "$CLUSTER_NAME" >/dev/null
+
+        expected_resources="$(printf '%s\n' \
+          deployment.apps/demo-api \
+          horizontalpodautoscaler.autoscaling/demo-api \
+          ingress.networking.k8s.io/demo-api \
+          networkpolicy.networking.k8s.io/demo-api \
+          poddisruptionbudget.policy/demo-api \
+          service/demo-api \
+          vmservicescrape.operator.victoriametrics.com/demo-api | LC_ALL=C sort)"
+        rendered_resources="$(timeout --foreground 3m kubectl \
+          --namespace "$TARGET_NAMESPACE" \
+          --request-timeout=2m \
+          apply --server-side --dry-run=server \
+          --field-manager=codebuild-deployer \
+          --filename "$render_dir/rendered.yaml" \
+          --output name | LC_ALL=C sort)"
+        if [ "$rendered_resources" != "$expected_resources" ]; then
+          echo "rendered workload does not match the fixed resource allowlist" >&2
+          exit 1
+        fi
+
+        timeout --foreground 3m kubectl \
+          --namespace "$TARGET_NAMESPACE" \
+          --request-timeout=2m \
+          apply --server-side --field-manager=codebuild-deployer \
+          --filename "$render_dir/rendered.yaml"
+        timeout --foreground 6m kubectl \
+          --namespace "$TARGET_NAMESPACE" \
+          rollout status deployment/demo-api --timeout=5m
+
+        export DEPLOYED_TAG="$RELEASE_TAG"
+        export DEPLOYED_COMMIT="$RELEASE_COMMIT"
+        export DEPLOYED_DIGEST="$EXPECTED_DIGEST"
+        echo "deployment completed for the requested immutable digest"

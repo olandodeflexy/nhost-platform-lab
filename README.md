@@ -11,7 +11,8 @@ does not claim to reproduce private Nhost infrastructure exactly.
 ## What is included
 
 - `infra/bootstrap`: encrypted S3 state and DynamoDB locking per AWS account.
-- `infra/modules`: VPC, ECR, EKS/Karpenter, and cluster add-on modules.
+- `infra/modules`: VPC, ECR, EKS/Karpenter, CodeBuild deployment, and cluster
+  add-on modules.
 - `infra/live`: Terragrunt account and region hierarchy for core, non-production,
   and production accounts.
 - `services/demo-api`: a dependency-free Go HTTP service with health, readiness,
@@ -34,18 +35,23 @@ flowchart LR
   BUILD --> ECR[Core ECR source]
   ECR --> ECR_EU[ECR eu-west-1 replica]
   ECR --> ECR_US[ECR us-east-1 replica]
-  ECR --> DEV[OIDC deploy to nonprod EKS]
+  ECR_EU --> NPBUILD[nonprod VPC CodeBuild]
+  NPBUILD --> DEV[private nonprod EKS]
   DEV --> ATTEST[Signed nonprod attestation]
   ATTEST --> APPROVE[GitHub production approval]
-  ECR_EU --> EU[prod eu-west-1 EKS]
-  ECR_US --> US[prod us-east-1 EKS]
-  APPROVE --> EU
-  APPROVE --> US
+  APPROVE --> EUBUILD[EU VPC CodeBuild]
+  APPROVE --> USBUILD[US VPC CodeBuild]
+  ECR_EU --> EUBUILD
+  ECR_US --> USBUILD
+  EUBUILD --> EU[prod eu-west-1 EKS]
+  USBUILD --> US[prod us-east-1 EKS]
 ```
 
-Nix builds the binary and OCI archive and supplies the pinned deployment tools.
-GitHub Actions provides orchestration and AWS OIDC identity. Kustomize owns the
-environment-specific Kubernetes configuration.
+Nix builds the binary and OCI archive. Trusted reusable workflows on protected
+`main` orchestrate from GitHub-hosted Actions with short-lived, workflow-bound
+AWS OIDC identities; fixed, VPC-attached CodeBuild projects perform
+private-cluster deployment. Kustomize owns the environment-specific Kubernetes
+configuration.
 
 ## Start locally
 

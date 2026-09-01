@@ -30,7 +30,12 @@ output "node_security_group_id" {
 }
 
 output "private_runner_security_group_id" {
-  description = "Security group to attach to private execution hosts that need EKS API access."
+  description = "Deprecated alias for private_executor_security_group_id."
+  value       = aws_security_group.private_runner.id
+}
+
+output "private_executor_security_group_id" {
+  description = "Security group for VPC executors that need private EKS API access."
   value       = aws_security_group.private_runner.id
 }
 

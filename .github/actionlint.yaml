@@ -1,5 +1,8 @@
-self-hosted-runner:
-  labels:
-    - nonprod
-    - prod-eu-west-1
-    - prod-us-east-1
+# actionlint 1.7.12 predates GitHub's reusable-job identity contexts. These
+# properties are documented GitHub-hosted runner contexts and deliberately let
+# a reusable workflow check out the exact commit that defines its current job.
+paths:
+  .github/workflows/demo-api-*-delivery.yml:
+    ignore:
+      - 'property "workflow_repository" is not defined in object type'
+      - 'property "workflow_sha" is not defined in object type'

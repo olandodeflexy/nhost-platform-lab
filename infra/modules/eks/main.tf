@@ -41,48 +41,13 @@ locals {
     }
   }
 
-  deployment_access_entries = {
-    for index, principal_arn in var.deployment_principal_arns : "deployment-${index}" => {
-      principal_arn     = principal_arn
-      kubernetes_groups = var.deployment_kubernetes_groups
-      policy_associations = {
-        namespace_edit = {
-          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy"
-          access_scope = {
-            type       = "namespace"
-            namespaces = var.deployment_namespaces
-          }
-        }
-      }
-    }
-  }
-
-  access_entries = merge(local.admin_access_entries, local.deployment_access_entries)
+  access_entries = local.admin_access_entries
 }
 
 check "private_runner_not_discovered_by_karpenter" {
   assert {
     condition     = lookup(local.private_runner_tags, "karpenter.sh/discovery", null) == null
     error_message = "The private-runner security group must not carry the Karpenter discovery tag."
-  }
-}
-
-resource "terraform_data" "access_configuration_guard" {
-  input = {
-    admin_principal_arns      = var.admin_principal_arns
-    deployment_principal_arns = var.deployment_principal_arns
-    deployment_namespaces     = var.deployment_namespaces
-  }
-
-  lifecycle {
-    precondition {
-      condition     = length(setintersection(toset(var.admin_principal_arns), toset(var.deployment_principal_arns))) == 0
-      error_message = "A principal cannot be both a cluster administrator and a namespace-scoped deployment identity."
-    }
-    precondition {
-      condition     = length(var.deployment_principal_arns) == 0 || length(var.deployment_namespaces) > 0
-      error_message = "deployment_namespaces must contain at least one namespace when deployment principals are configured."
-    }
   }
 }
 
@@ -274,7 +239,6 @@ module "eks" {
 
   depends_on = [
     aws_iam_role_policy_attachment.ebs_csi,
-    terraform_data.access_configuration_guard,
   ]
 }
 

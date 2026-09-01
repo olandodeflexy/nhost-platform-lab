@@ -1,0 +1,193 @@
+name: "demo-api: trusted production delivery"
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Released demo-api version in X.Y.Z format
+        required: true
+        type: string
+permissions: {}
+
+jobs:
+  validate:
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      commit: ${{ steps.release.outputs.commit }}
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+
+    steps:
+      - name: Require the fixed AWS private executor
+        env:
+          DELIVERY_EXECUTOR: ${{ vars.DELIVERY_EXECUTOR }}
+          PRIVATE_ATTESTATIONS_SUPPORTED: ${{ vars.PRIVATE_ATTESTATIONS_SUPPORTED }}
+          REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
+          TRUSTED_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REPOSITORY" != "olandodeflexy/nhost-platform-lab" ] ||
+            [ "$TRUSTED_WORKFLOW_REPOSITORY" != "olandodeflexy/nhost-platform-lab" ]; then
+            echo "production delivery is restricted to the trusted repository" >&2
+            exit 1
+          fi
+          if [ "$DELIVERY_EXECUTOR" != "codebuild" ]; then
+            echo "production promotion is blocked: set DELIVERY_EXECUTOR=codebuild after the fixed projects exist" >&2
+            exit 1
+          fi
+          case "$REPOSITORY_VISIBILITY" in
+            public)
+              ;;
+            private|internal)
+              if [ "$PRIVATE_ATTESTATIONS_SUPPORTED" != "true" ]; then
+                echo "production promotion is blocked: private attestations require verified Enterprise support" >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "production promotion is blocked: unrecognized repository visibility" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Resolve and validate the stable release
+        id: release
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "version must be X.Y.Z" >&2
+            exit 1
+          fi
+          if [ "$GITHUB_REF" != "refs/heads/${DEFAULT_BRANCH}" ]; then
+            echo "production promotion must run from the default branch" >&2
+            exit 1
+          fi
+          release_tag="demo-api@${VERSION}"
+
+          release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}")"
+          if ! jq -e --arg tag "$release_tag" '
+            .tag_name == $tag and
+            .draft == false and
+            .prerelease == false and
+            .published_at != null
+          ' <<<"$release_json" >/dev/null; then
+            echo "production requires a published, non-prerelease GitHub release" >&2
+            exit 1
+          fi
+
+          ref_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${release_tag}")"
+          object_type="$(jq -r '.object.type // empty' <<<"$ref_json")"
+          commit="$(jq -r '.object.sha // empty' <<<"$ref_json")"
+          for _ in 1 2 3 4 5; do
+            if [ "$object_type" = "commit" ]; then
+              break
+            fi
+            if [ "$object_type" != "tag" ] || [[ ! "$commit" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+              echo "release tag did not resolve to a Git commit" >&2
+              exit 1
+            fi
+            tag_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${commit}")"
+            object_type="$(jq -r '.object.type // empty' <<<"$tag_json")"
+            commit="$(jq -r '.object.sha // empty' <<<"$tag_json")"
+          done
+          if [ "$object_type" != "commit" ] || [[ ! "$commit" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+            echo "release tag did not resolve to an immutable Git commit" >&2
+            exit 1
+          fi
+
+          {
+            printf 'tag=%s\n' "$release_tag"
+            printf 'version=%s\n' "$VERSION"
+            printf 'commit=%s\n' "$commit"
+          } >>"$GITHUB_OUTPUT"
+
+  deploy:
+    needs:
+      - validate
+    permissions:
+      attestations: read
+      contents: read
+      id-token: write
+    strategy:
+      max-parallel: 1
+      fail-fast: true
+      matrix:
+        include:
+          - region: eu-west-1
+            project_variable: PROD_EU_CODEBUILD_PROJECT
+          - region: us-east-1
+            project_variable: PROD_US_CODEBUILD_PROJECT
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 75
+
+    steps:
+      - name: Check out trusted production implementation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          persist-credentials: false
+          ref: ${{ job.workflow_sha }}
+
+      - name: Set up trusted Nix toolchain
+        uses: ./.github/actions/setup-nix
+
+      - name: Configure production AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_PROD_ACCOUNT_ID }}:role/github-actions-nhost-platform-lab-deploy
+          aws-region: ${{ matrix.region }}
+          allowed-account-ids: ${{ secrets.AWS_PROD_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          output-credentials: false
+          role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.region }}
+          unset-current-credentials: true
+
+      - name: Resolve and verify promoted regional image
+        id: promotion
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          nix run --no-update-lock-file .#verify-promotion --
+          "${{ secrets.AWS_CORE_ACCOUNT_ID }}"
+          "${{ vars.ECR_REGION }}"
+          "${{ matrix.region }}"
+          "${{ vars.ECR_REPOSITORY }}"
+          "${{ needs.validate.outputs.version }}"
+          "${{ github.repository }}"
+          "${{ needs.validate.outputs.commit }}"
+          "${{ vars.NONPROD_CODEBUILD_PROJECT }}"
+
+      - name: Select fixed CodeBuild project
+        id: project
+        env:
+          PROJECT_VARIABLE: ${{ matrix.project_variable }}
+          PROD_EU_CODEBUILD_PROJECT: ${{ vars.PROD_EU_CODEBUILD_PROJECT }}
+          PROD_US_CODEBUILD_PROJECT: ${{ vars.PROD_US_CODEBUILD_PROJECT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          project_name="${!PROJECT_VARIABLE}"
+          if [ -z "$project_name" ]; then
+            echo "CodeBuild project variable $PROJECT_VARIABLE is empty" >&2
+            exit 1
+          fi
+          echo "name=$project_name" >>"$GITHUB_OUTPUT"
+
+      - name: Deploy tested image digest
+        run: >-
+          ./scripts/run-codebuild-deploy.sh
+          "${{ steps.project.outputs.name }}"
+          "${{ matrix.region }}"
+          "${{ needs.validate.outputs.tag }}"
+          "${{ needs.validate.outputs.commit }}"
+          "${{ steps.promotion.outputs.digest }}"

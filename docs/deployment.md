@@ -1,191 +1,202 @@
 # Deployment
 
 For first-time AWS and EKS provisioning, follow the ordered
-[EKS deployment runbook](eks-deployment-runbook.md). This document focuses on
-release and promotion after the platform is available.
+[EKS deployment runbook](eks-deployment-runbook.md). This document covers the
+release and promotion path after the cluster prerequisites are installed.
+
+## Delivery architecture
+
+GitHub-hosted runners build and publish the image, verify promotion evidence,
+and create the public non-production attestation. They never connect to the
+private EKS endpoints. Each deployment is performed by an ordinary on-demand
+AWS CodeBuild project attached to the matching VPC:
+
+1. A thin event workflow calls a trusted reusable delivery workflow from
+   `refs/heads/main`; only jobs defined by that reusable workflow can obtain the
+   short-lived AWS identity through OIDC.
+2. The starter role may start, poll, and stop only the fixed regional project.
+3. CodeBuild fetches the exact release tag, proves that it resolves to the
+   requested commit, and resolves the immutable version tag in regional ECR.
+4. A Terraform-owned `NO_SOURCE` buildspec renders only the fixed Kustomize
+   overlay, checks an exact seven-resource allowlist, deploys the digest, and
+   waits for rollout.
+5. GitHub accepts success only when CodeBuild exports the same tag, commit, and
+   digest that were requested.
+
+No self-hosted GitHub runner is used or supported. The CodeBuild project has no
+GitHub webhook, source credential, artifact store, cache, privileged mode, or
+public build access. Its executor image, kubectl, and Kustomize are pinned by
+SHA-256.
 
 ## Required GitHub configuration
 
-Create GitHub Environments named `release`, `nonprod`, and `production`. Restrict
-`release` and `nonprod` to protected tags matching `demo-api@*`; restrict
-`production` to the protected default branch and require reviewers. Add a tag
-ruleset that prevents force-updating or deleting `demo-api@*` tags, while allowing
-the release GitHub App to create them. These environment rules are part of the
-OIDC boundary, not optional workflow hygiene. Artifact attestations must be
-enabled. They are available for public repositories on current GitHub plans;
-private or internal repositories require GitHub Enterprise Cloud. The current
-self-hosted-runner workflow supports only the latter mode: make the repository
-private/internal, verify the Enterprise attestation capability, and set the
-repository variable `PRIVATE_ATTESTATIONS_SUPPORTED=true`. The workflows fail
-before publishing or scheduling a deployment when either condition is absent.
-Do not set the variable without verifying the capability.
+Create case-sensitive GitHub Environments:
 
-The EKS API endpoints are private. Register ephemeral or tightly managed
-self-hosted runners only after the repository is private/internal and the
-capability gate above passes. Never register one while this repository is
-public, even if it is JIT or ephemeral. Use network access to each cluster and
-these labels:
+- `release`, restricted to protected tags matching `demo-api@*`;
+- `nonprod`, restricted to protected tags matching `demo-api@*`;
+- `production`, restricted to the protected default branch and requiring a
+  reviewer.
 
-- `self-hosted`, `linux`, `nonprod` for the non-production VPC;
-- `self-hosted`, `linux`, `prod-eu-west-1` for the EU production VPC;
-- `self-hosted`, `linux`, `prod-us-east-1` for the US production VPC.
+Protect the default branch and add a tag ruleset that prevents force-updating
+or deleting `demo-api@*`. Artifact attestations work for public repositories on
+current GitHub plans. Private/internal repositories require GitHub Enterprise
+Cloud; set `PRIVATE_ATTESTATIONS_SUPPORTED=true` only after confirming that
+capability. Public repositories leave that variable unset.
 
-Do not place a long-lived AWS key on those runners. The jobs still obtain their
-AWS identity through GitHub OIDC. If GitHub Enterprise Cloud is unavailable,
-keep the repository public and first implement the separately reviewed
-AWS-native VPC executor described in the EKS runbook; the intended option is a
-narrowly scoped CodeBuild project invoked from a GitHub-hosted job. That path is
-not implemented yet. A public repository with a self-hosted runner and a
-private GitHub Free/Pro/Team repository with the current attestation step are
-both unsupported.
+Store account IDs as protected Environment secrets. They are identifiers, not
+credentials, but this makes GitHub mask them in logs.
 
-Store account IDs as protected GitHub Environment secrets. AWS account IDs are
-identifiers rather than credentials, but using environment secrets makes log
-masking automatic and keeps them out of ordinary repository configuration.
-
-| Environment | Required account-ID secrets |
+| Environment | Account-ID secrets |
 | --- | --- |
 | `release` | `AWS_CORE_ACCOUNT_ID` |
 | `nonprod` | `AWS_CORE_ACCOUNT_ID`, `AWS_NONPROD_ACCOUNT_ID` |
 | `production` | `AWS_CORE_ACCOUNT_ID`, `AWS_PROD_ACCOUNT_ID` |
 
-Configure these non-sensitive repository variables:
+Set these non-sensitive repository variables:
 
-| Variable | Example |
+| Variable | Value |
 | --- | --- |
+| `DELIVERY_EXECUTOR` | `codebuild` only after all executor prerequisites pass |
 | `ECR_REGION` | `eu-central-1` |
 | `ECR_REPOSITORY` | `demo-api` |
-| `NONPROD_CLUSTER_NAME` | `nhost-lab-nonprod-eu-west-1` |
-| `PROD_EU_CLUSTER_NAME` | `nhost-lab-prod-eu-west-1` |
-| `PROD_US_CLUSTER_NAME` | `nhost-lab-prod-us-east-1` |
+| `NONPROD_CODEBUILD_PROJECT` | `nhost-lab-nonprod-eu-west-1-demo-api-deploy` |
+| `PROD_EU_CODEBUILD_PROJECT` | `nhost-lab-prod-eu-west-1-demo-api-deploy` |
+| `PROD_US_CODEBUILD_PROJECT` | `nhost-lab-prod-us-east-1-demo-api-deploy` |
 | `RELEASE_BOT_CLIENT_ID` | GitHub App Client ID |
-| `PRIVATE_ATTESTATIONS_SUPPORTED` | `true` only after verifying private-repository support |
+| `PRIVATE_ATTESTATIONS_SUPPORTED` | `true` only for verified private Enterprise use |
 
-Install a GitHub App on the repository with permission to create releases. Store
-its Client ID in the non-sensitive repository variable
-`RELEASE_BOT_CLIENT_ID`, and stream its PEM private key into the Actions secret
-`RELEASE_BOT_PRIVATE_KEY`. Do not use the legacy numeric App ID in the Client ID
-variable. The App token is intentional: a release created with the workflow's
-default token does not trigger the downstream release workflow.
+Install the release GitHub App with only the permissions needed to create tags
+and releases. Store its Client ID in `RELEASE_BOT_CLIENT_ID` and its PEM private
+key in the Actions secret `RELEASE_BOT_PRIVATE_KEY`. Do not store AWS access
+keys in GitHub.
 
-Set the immutable repository identity in `infra/live/github.hcl` before applying
-the OIDC roles. The IDs are public GitHub identifiers, not secrets, and should be
-committed with the repository configuration. Retrieve all four values after the
-repository exists:
+The immutable public repository identity is committed in
+`infra/live/github.hcl`. Re-check it if the repository is transferred or
+recreated:
 
 ```bash
 gh api repos/olandodeflexy/nhost-platform-lab \
   --jq '{owner: .owner.login, owner_id: (.owner.id | tostring), name: .name, id: (.id | tostring)}'
 ```
 
-The module constructs exact subjects such as
-`repo:olandodeflexy@42207883/nhost-platform-lab@1352263838:environment:release`.
-Name-only subjects and wildcards are rejected. Repositories created before July
-15, 2026 must opt in to GitHub immutable OIDC subjects or these policies will not
-match their tokens.
+## AWS identities and authorization
 
-Create the referenced `platform-admin` roles before applying EKS. The cluster
-creator receives no implicit administrator entry. Each `platform-addons` root
-requests its Kubernetes token through `platform-admin`, so authorize the
-Terragrunt infrastructure identity to assume that role for the add-on apply.
+The core `github-actions-nhost-platform-lab-release` role can publish only to
+the application ECR repository. Every AWS role trust requires both the exact
+immutable repository/environment subject and the exact reusable
+`job_workflow_ref` on `refs/heads/main`. A caller or a different workflow cannot
+obtain the same role merely by naming the Environment. The nonprod and production
+`github-actions-nhost-platform-lab-deploy` roles are starter identities: they
+have no EKS access. Their CodeBuild permission is constrained to the exact
+project ARN, the three plaintext inputs `RELEASE_TAG`, `RELEASE_COMMIT`, and
+`EXPECTED_DIGEST`, and no source, buildspec, image, role, compute, privileged,
+artifact, cache, retry, encryption, or logging override. Explicit deny
+statements protect these restrictions and deny `iam:PassRole`.
 
-GitHub deployment roles receive `AmazonEKSEditPolicy` only in `demo-api`; they
-are not cluster administrators and cannot create namespaces. The
-`cluster-prerequisites` release creates the namespace and its narrowly scoped
-VictoriaMetrics RBAC before application deployment begins.
+Each regional CodeBuild project has a separate service role. Its trust policy
+requires both the exact project ARN and source account. It may:
 
-Create these OIDC roles with trust restricted to this repository:
+- manage only the VPC network interfaces CodeBuild requires;
+- write only its private seven-day CloudWatch log stream;
+- describe only its EKS cluster;
+- resolve the exact regional `demo-api` ECR repository;
+- authenticate to Kubernetes as the custom
+  `nhost-platform-lab:demo-api-deployers` group.
 
-- `github-actions-nhost-platform-lab-release` in `core`, with ECR push access;
-- `github-actions-nhost-platform-lab-deploy` in `nonprod`, with access to only
-  the non-production cluster;
-- `github-actions-nhost-platform-lab-deploy` in `prod`, with access to only the
-  two production clusters and read-only access to the source and regional ECR
-  repositories used to verify promotions.
+The group has create/get/list/watch/update/patch only for Deployments, Services,
+Ingresses, NetworkPolicies, HPAs, PDBs, and `VMServiceScrape` in `demo-api`.
+It cannot manage Secrets, ConfigMaps, ServiceAccounts, RBAC, pod exec/attach,
+other namespaces, or cluster-scoped resources. The administrator-owned
+platform prerequisites create the namespace, ServiceAccount, Role, and
+RoleBinding before application delivery.
 
-The ECR repository policy delegates to the non-production and production
-accounts but requires `aws:PrincipalArn` to match the exact controller,
-Karpenter-node, or production promotion-verifier role. Worker-node roles still
-need the ECR read identity policies, which the EKS module attaches.
+AWS does not expose IAM condition keys for every `StartBuild` field, including
+some timeout and debug-session overrides. The fixed buildspec bounds network
+and Kubernetes commands, the service role has no SSM permissions, automatic
+retry is disabled, and concurrency is one. A validating API/Lambda dispatcher
+would be required if policy demands rejection of every unsupported API field.
 
-ECR implicitly scopes each repository policy to the repository where it is
-installed. The policy statements intentionally omit `Resource`: adding
-`Resource = "*"` to these role-constrained statements is rejected by the ECR
-`SetRepositoryPolicy` API. Generic IAM resource-policy validation reports a
-missing-resource finding for this ECR-specific form, so deployment validation
-must include an ECR API acceptance check rather than treating that generic
-finding as authoritative.
+## Provisioning order
 
-The roles are implemented by `infra/modules/github-oidc-role`. Create the deploy
-roles before EKS because the cluster configuration grants them access by ARN.
+Use this order so that every regional pull/deployment identity exists and can be
+verified before delivery is enabled:
 
-## Release
+1. Bootstrap state and create human `platform-admin` roles.
+2. Apply each network and EKS root.
+3. Apply the GitHub OIDC starter roles.
+4. Apply all three `codebuild-deployer` roots so their service roles exist.
+5. Apply the core registry root, including regional replication and exact
+   cross-account reader policies.
+6. From a separately authorized VPC-connected administrator path, apply each
+   `platform-addons` root. The application CodeBuild role cannot do this.
+7. Validate CodeBuild, regional ECR, namespace/RBAC, and rollout behavior; then
+   set `DELIVERY_EXECUTOR=codebuild`.
 
-1. Verify the supported-delivery capability gate, then merge ordinary changes
-   only after `ci.yml` succeeds.
-2. Open a final pull request titled `release(demo-api): 1.2.3`.
-3. Merging that pull request creates tag and release `demo-api@1.2.3`.
-4. `demo-api-release.yml` runs Nix checks, builds the image once, pushes it to
-   ECR, resolves its digest, and automatically deploys the non-production overlay.
-5. After the non-production rollout succeeds, the workflow signs a custom
-   Sigstore-backed GitHub attestation binding the version, exact release commit,
-   and digest to that successful deployment.
-6. Run `promote-production.yml` with only the released version. GitHub pauses at
-   the protected `production` environment before applying both regional overlays.
-
-The production workflow does not accept a caller-provided digest. For each
-production region it resolves the digest from the immutable source ECR version
-tag, requires the regional replica to have the same digest, and verifies the
-signed non-production deployment attestation from `demo-api-release.yml` before
-deploying the regional repository URL. It resolves the published release tag
-once, checks out that immutable commit in every production job, and requires the
-attestation to name the same commit, so a moved Git tag cannot change production
-manifests or promotion code. Verification also pins the attestation certificate
-to the exact release workflow identity, release tag ref, and release commit. The
-release workflow intentionally has no manual-dispatch path; re-run its existing
-release-event workflow run if infrastructure failure requires a retry.
-
-Account-ID masking protects workflow logs, but the successful non-production
-attestation intentionally names the fully qualified ECR image, so its subject
-includes the ECR registry account ID. AWS account IDs are not authentication
-credentials. The current Enterprise/private mode keeps the repository-scoped
-attestation private; a future public-source/AWS-executor mode would make that
-signed subject public. If policy treats the registry identifier as confidential,
-use only the private Enterprise mode or redesign the provenance subject.
-
-The core registry root pre-creates immutable `demo-api` repositories in
-`eu-west-1` and `us-east-1`, applies the same pull and lifecycle policies, and
-configures replication from `eu-central-1`. Apply that root before publishing the
-first release. ECR replicates only images pushed after replication is enabled;
-copy any existing release images to both regional repositories once before
-promoting them. The first replication apply also creates the AWS-managed
-`AWSServiceRoleForECRReplication`; either pre-create it as an account bootstrap
-step or grant `terraform-deploy` a condition-scoped
-`iam:CreateServiceLinkedRole` permission only for
+The first core registry apply may create
+`AWSServiceRoleForECRReplication`. Pre-create it or grant the infrastructure
+identity one-time `iam:CreateServiceLinkedRole` permission constrained to
 `replication.ecr.amazonaws.com`.
 
-## Manual deployment
+## Release and promotion
 
-After assuming the correct AWS role, the same deployment can be run locally with
-Nix:
+1. Merge changes only after `ci.yml` succeeds.
+2. Merge a PR titled `release(demo-api): X.Y.Z`.
+3. The GitHub App creates immutable tag and release `demo-api@X.Y.Z`.
+4. `demo-api-release.yml` calls the trusted
+   `demo-api-release-delivery.yml@main` workflow. The reusable workflow validates
+   the published release and builds/tests the image in a job with no OIDC
+   permission, AWS credentials, or release environment. It transfers the raw
+   image archive by immutable GitHub artifact ID and digest to a fresh publisher
+   job. That job checks out publisher tooling from `job.workflow_sha`, verifies
+   the archive digest and release-commit labels before requesting AWS
+   credentials, publishes to source ECR, invokes nonprod CodeBuild, verifies the
+   returned coordinates, and then creates the nonprod deployment attestation.
+5. Run `promote-production.yml` from `main` with only `version=X.Y.Z`.
+6. The thin dispatcher calls `demo-api-production-delivery.yml@main`. After
+   production approval, each trusted GitHub-hosted matrix job resolves and
+   verifies the signer-bound nonprod attestation and regional replica, then
+   invokes its fixed CodeBuild project one region at a time.
+
+The production workflow never accepts an independently supplied digest. It
+derives the digest from the immutable ECR version tag, verifies the exact
+release-workflow certificate identity, source ref, source commit, custom
+predicate, and GitHub-hosted provenance, and passes that value as an assertion
+to CodeBuild. CodeBuild independently resolves the same regional version tag
+before deployment.
+
+The attestation subject is the fully qualified source ECR image, so a public
+attestation exposes the core ECR account ID as non-secret metadata. Its custom
+predicate uses the account-free CodeBuild project name and build ID, not a build
+ARN, so it does not additionally expose the nonprod account ID. If policy treats
+AWS account IDs as confidential, redesign the provenance subject before enabling
+delivery.
+
+## Cost and bootstrap boundary
+
+Idle on-demand CodeBuild projects and IAM roles do not incur compute-hour
+charges. A deployment is billed only for its build minutes, plus small
+CloudWatch Logs storage/ingestion. The VPC NAT gateways, EKS control planes,
+nodes, load balancers, and observability stack remain the material recurring
+costs.
+
+This workload executor deliberately cannot bootstrap `platform-addons`, whose
+Terraform Helm/Kubernetes providers need private API access and cluster-admin.
+Use a VPN/VPC-connected operator or a separate, manually invoked infrastructure
+executor. Never broaden the application CodeBuild role to cluster admin.
+
+## Manual deployment and rollback
+
+The local Nix command remains available to an already authorized operator with
+private cluster connectivity:
 
 ```bash
 nix run .#deploy -- \
   nonprod-eu-west-1 \
   nhost-lab-nonprod-eu-west-1 \
   eu-west-1 \
-  "${NHOST_CORE_ACCOUNT_ID}.dkr.ecr.eu-central-1.amazonaws.com/demo-api" \
-  sha256:0123456789abcdef
+  "${NHOST_CORE_ACCOUNT_ID}.dkr.ecr.eu-west-1.amazonaws.com/demo-api" \
+  sha256:DIGEST
 ```
 
-The command copies the selected overlay into a temporary directory, sets the
-image by digest, renders it, applies it server-side, and waits for the deployment
-rollout.
-
-## Rollback
-
-Re-run the production promotion with the last known-good released version.
-Kubernetes rolls back to its verified immutable regional digest while retaining
-the current manifest configuration. If the manifest itself caused the failure,
-revert that commit and deploy the same known-good digest from the reverted
-revision through the manual procedure.
+For rollback, promote the last known-good released version through the same
+attestation-backed path. Do not pair an old version with an unrelated digest.

@@ -1,0 +1,328 @@
+name: "demo-api: trusted release delivery"
+
+on:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Published stable demo-api release tag
+        required: true
+        type: string
+permissions: {}
+
+jobs:
+  validate:
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      commit: ${{ steps.release.outputs.commit }}
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+
+    steps:
+      - name: Require the fixed AWS private executor
+        env:
+          DELIVERY_EXECUTOR: ${{ vars.DELIVERY_EXECUTOR }}
+          PRIVATE_ATTESTATIONS_SUPPORTED: ${{ vars.PRIVATE_ATTESTATIONS_SUPPORTED }}
+          REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
+          TRUSTED_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REPOSITORY" != "olandodeflexy/nhost-platform-lab" ] ||
+            [ "$TRUSTED_WORKFLOW_REPOSITORY" != "olandodeflexy/nhost-platform-lab" ]; then
+            echo "release delivery is restricted to the trusted repository" >&2
+            exit 1
+          fi
+          if [ "$DELIVERY_EXECUTOR" != "codebuild" ]; then
+            echo "release deployment is blocked: set DELIVERY_EXECUTOR=codebuild after the fixed projects exist" >&2
+            exit 1
+          fi
+          case "$REPOSITORY_VISIBILITY" in
+            public)
+              ;;
+            private|internal)
+              if [ "$PRIVATE_ATTESTATIONS_SUPPORTED" != "true" ]; then
+                echo "release deployment is blocked: private attestations require verified Enterprise support" >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "release deployment is blocked: unrecognized repository visibility" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Resolve and validate the stable release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^demo-api@([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "release tag must be demo-api@X.Y.Z" >&2
+            exit 1
+          fi
+          version="${BASH_REMATCH[1]}"
+
+          release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")"
+          if ! jq -e --arg tag "$RELEASE_TAG" '
+            .tag_name == $tag and
+            .draft == false and
+            .prerelease == false and
+            .published_at != null
+          ' <<<"$release_json" >/dev/null; then
+            echo "release delivery requires a published, non-prerelease GitHub release" >&2
+            exit 1
+          fi
+
+          ref_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}")"
+          object_type="$(jq -r '.object.type // empty' <<<"$ref_json")"
+          commit="$(jq -r '.object.sha // empty' <<<"$ref_json")"
+          for _ in 1 2 3 4 5; do
+            if [ "$object_type" = "commit" ]; then
+              break
+            fi
+            if [ "$object_type" != "tag" ] || [[ ! "$commit" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+              echo "release tag did not resolve to a Git commit" >&2
+              exit 1
+            fi
+            tag_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${commit}")"
+            object_type="$(jq -r '.object.type // empty' <<<"$tag_json")"
+            commit="$(jq -r '.object.sha // empty' <<<"$tag_json")"
+          done
+          if [ "$object_type" != "commit" ] || [[ ! "$commit" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+            echo "release tag did not resolve to an immutable Git commit" >&2
+            exit 1
+          fi
+          if [ "$GITHUB_REF" != "refs/tags/${RELEASE_TAG}" ] || [ "$GITHUB_SHA" != "$commit" ]; then
+            echo "trusted release delivery must be called by the matching release-tag event" >&2
+            exit 1
+          fi
+
+          {
+            printf 'tag=%s\n' "$RELEASE_TAG"
+            printf 'version=%s\n' "$version"
+            printf 'commit=%s\n' "$commit"
+          } >>"$GITHUB_OUTPUT"
+
+  build-release:
+    needs:
+      - validate
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    outputs:
+      artifact_digest: ${{ steps.image.outputs['artifact-digest'] }}
+      artifact_id: ${{ steps.image.outputs['artifact-id'] }}
+
+    steps:
+      - name: Check out immutable release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository }}
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.commit }}
+
+      - name: Set up release Nix toolchain
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            keep-outputs = true
+            keep-derivations = true
+
+      - name: Build and test release artifacts without cloud credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          nix flake check --no-update-lock-file --print-build-logs
+          archive="$(nix build \
+            --no-link \
+            --no-update-lock-file \
+            --print-out-paths \
+            .#demo-api-image)"
+          if [ ! -f "$archive" ] || [ -L "$archive" ]; then
+            echo "Nix did not produce a regular image archive" >&2
+            exit 1
+          fi
+          archive_size="$(stat --format='%s' "$archive")"
+          if [ "$archive_size" -le 0 ] || [ "$archive_size" -gt 1073741824 ]; then
+            echo "image archive size is outside the permitted range" >&2
+            exit 1
+          fi
+          install -m 0600 "$archive" "$RUNNER_TEMP/demo-api-image.tar.gz"
+
+      - name: Upload the tested image archive
+        id: image
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: ${{ runner.temp }}/demo-api-image.tar.gz
+          if-no-files-found: error
+          archive: false
+          overwrite: false
+          retention-days: 1
+
+  build-publish:
+    needs:
+      - validate
+      - build-release
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    runs-on: ubuntu-24.04
+    environment: release
+    timeout-minutes: 30
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
+
+    steps:
+      - name: Check out trusted publisher implementation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          persist-credentials: false
+          ref: ${{ job.workflow_sha }}
+
+      - name: Set up trusted publisher toolchain
+        uses: ./.github/actions/setup-nix
+
+      - name: Download the tested image archive by immutable artifact ID
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build-release.outputs.artifact_id }}
+          path: ${{ runner.temp }}/release-image
+          merge-multiple: true
+          digest-mismatch: error
+
+      - name: Verify the tested image archive
+        env:
+          EXPECTED_ARTIFACT_DIGEST: ${{ needs.build-release.outputs.artifact_digest }}
+          EXPECTED_COMMIT: ${{ needs.validate.outputs.commit }}
+          IMAGE_ARCHIVE: ${{ runner.temp }}/release-image/demo-api-image.tar.gz
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "$IMAGE_ARCHIVE" ] || [ -L "$IMAGE_ARCHIVE" ]; then
+            echo "downloaded image archive is not a regular file" >&2
+            exit 1
+          fi
+          if [[ ! "$EXPECTED_ARTIFACT_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo "artifact service returned an invalid digest" >&2
+            exit 1
+          fi
+          actual_digest="sha256:$(sha256sum "$IMAGE_ARCHIVE" | cut -d' ' -f1)"
+          if [ "$actual_digest" != "$EXPECTED_ARTIFACT_DIGEST" ]; then
+            echo "downloaded image archive digest does not match the uploaded artifact" >&2
+            exit 1
+          fi
+          archive_size="$(stat --format='%s' "$IMAGE_ARCHIVE")"
+          if [ "$archive_size" -le 0 ] || [ "$archive_size" -gt 1073741824 ]; then
+            echo "downloaded image archive size is outside the permitted range" >&2
+            exit 1
+          fi
+          config_json="$(nix develop --no-update-lock-file --command \
+            skopeo inspect --config "docker-archive:${IMAGE_ARCHIVE}")"
+          if ! jq -e --arg commit "$EXPECTED_COMMIT" '
+            .config.Labels["org.opencontainers.image.revision"] == $commit and
+            .config.Labels["org.opencontainers.image.source"] ==
+              "https://github.com/olandodeflexy/nhost-platform-lab"
+          ' <<<"$config_json" >/dev/null; then
+            echo "image archive provenance labels do not match the release commit" >&2
+            exit 1
+          fi
+
+      - name: Configure core-account AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_CORE_ACCOUNT_ID }}:role/github-actions-nhost-platform-lab-release
+          aws-region: ${{ vars.ECR_REGION }}
+          allowed-account-ids: ${{ secrets.AWS_CORE_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          output-credentials: false
+          role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}-release
+          unset-current-credentials: true
+
+      - name: Publish Nix-built image to ECR
+        id: publish
+        env:
+          AWS_REGION: ${{ vars.ECR_REGION }}
+          IMAGE_ARCHIVE: ${{ runner.temp }}/release-image/demo-api-image.tar.gz
+          REGISTRY: ${{ secrets.AWS_CORE_ACCOUNT_ID }}.dkr.ecr.${{ vars.ECR_REGION }}.amazonaws.com
+          REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: >-
+          nix develop --no-update-lock-file --command
+          ./scripts/publish-image.sh
+          "$REGISTRY" "$REPOSITORY" "$VERSION"
+
+  deploy-nonprod:
+    needs:
+      - validate
+      - build-publish
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    runs-on: ubuntu-24.04
+    environment: nonprod
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out trusted delivery implementation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          persist-credentials: false
+          ref: ${{ job.workflow_sha }}
+
+      - name: Configure non-production AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_NONPROD_ACCOUNT_ID }}:role/github-actions-nhost-platform-lab-deploy
+          aws-region: eu-west-1
+          allowed-account-ids: ${{ secrets.AWS_NONPROD_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          output-credentials: false
+          role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}-nonprod
+          unset-current-credentials: true
+
+      - name: Deploy immutable image to non-production
+        id: deployment
+        env:
+          CODEBUILD_PROJECT: ${{ vars.NONPROD_CODEBUILD_PROJECT }}
+        run: >-
+          ./scripts/run-codebuild-deploy.sh
+          "$CODEBUILD_PROJECT"
+          eu-west-1
+          "${{ needs.validate.outputs.tag }}"
+          "${{ needs.validate.outputs.commit }}"
+          "${{ needs.build-publish.outputs.digest }}"
+
+      - name: Attest successful non-production deployment
+        id: promotion_attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ secrets.AWS_CORE_ACCOUNT_ID }}.dkr.ecr.${{ vars.ECR_REGION }}.amazonaws.com/${{ vars.ECR_REPOSITORY }}
+          subject-digest: ${{ needs.build-publish.outputs.digest }}
+          predicate-type: https://github.com/${{ github.repository }}/attestations/nonprod-deployment/v1
+          predicate: >-
+            {"environment":"nonprod","status":"succeeded","version":"${{ needs.validate.outputs.version }}","releaseTag":"${{ needs.validate.outputs.tag }}","commit":"${{ needs.validate.outputs.commit }}","image":"${{ secrets.AWS_CORE_ACCOUNT_ID }}.dkr.ecr.${{ vars.ECR_REGION }}.amazonaws.com/${{ vars.ECR_REPOSITORY }}","digest":"${{ needs.build-publish.outputs.digest }}","executorProject":"${{ vars.NONPROD_CODEBUILD_PROJECT }}","executorBuild":"${{ steps.deployment.outputs.build_id }}","workflowRun":"https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"}
+          show-summary: false
+
+      - name: Record promotion coordinates
+        run: |
+          {
+            echo "version=${{ needs.validate.outputs.version }}"
+            echo "commit=${{ needs.validate.outputs.commit }}"
+            echo "repository=${{ vars.ECR_REPOSITORY }}"
+            echo "digest=${{ needs.build-publish.outputs.digest }}"
+            echo "attestation=${{ steps.promotion_attestation.outputs['attestation-url'] }}"
+          } >>"$GITHUB_STEP_SUMMARY"

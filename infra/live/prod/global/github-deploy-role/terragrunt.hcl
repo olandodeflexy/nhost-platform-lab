@@ -15,14 +15,17 @@ terraform {
 
 inputs = merge(include.root.inputs, {
   role_name         = "github-actions-nhost-platform-lab-deploy"
-  mode              = "eks-deploy"
+  mode              = "codebuild-start"
   github_repository = local.github.repository
   github_environments = [
     "production",
   ]
-  eks_cluster_arns = [
-    "arn:aws:eks:eu-west-1:${local.account.account_id}:cluster/nhost-lab-prod-eu-west-1",
-    "arn:aws:eks:us-east-1:${local.account.account_id}:cluster/nhost-lab-prod-us-east-1",
+  github_job_workflow_files = [
+    "demo-api-production-delivery.yml",
+  ]
+  codebuild_project_arns = [
+    "arn:aws:codebuild:eu-west-1:${local.account.account_id}:project/nhost-lab-prod-eu-west-1-demo-api-deploy",
+    "arn:aws:codebuild:us-east-1:${local.account.account_id}:project/nhost-lab-prod-us-east-1-demo-api-deploy",
   ]
   ecr_pull_repository_arns = [
     "arn:aws:ecr:eu-central-1:${local.core_account.account_id}:repository/demo-api",

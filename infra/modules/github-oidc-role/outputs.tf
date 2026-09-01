@@ -12,3 +12,8 @@ output "github_subjects" {
   description = "Exact immutable GitHub OIDC subjects trusted by this role."
   value       = local.github_subjects
 }
+
+output "github_job_workflow_refs" {
+  description = "Exact reusable workflows on refs/heads/main trusted by this role."
+  value       = local.github_job_workflow_refs
+}

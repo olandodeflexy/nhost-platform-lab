@@ -1,9 +1,41 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: workload-monitoring-editor
+  name: demo-api-deployer
   namespace: {{ required "workloadNamespace is required" .Values.workloadNamespace | quote }}
 rules:
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+    verbs: &deploymentVerbs
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+  - apiGroups:
+      - ""
+    resources:
+      - services
+    verbs: *deploymentVerbs
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - ingresses
+      - networkpolicies
+    verbs: *deploymentVerbs
+  - apiGroups:
+      - autoscaling
+    resources:
+      - horizontalpodautoscalers
+    verbs: *deploymentVerbs
+  - apiGroups:
+      - policy
+    resources:
+      - poddisruptionbudgets
+    verbs: *deploymentVerbs
   - apiGroups:
       - operator.victoriametrics.com
     resources:
@@ -15,12 +47,11 @@ rules:
       - create
       - update
       - patch
-      - delete
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: workload-monitoring-editors
+  name: demo-api-deployers
   namespace: {{ required "workloadNamespace is required" .Values.workloadNamespace | quote }}
 subjects:
 {{- range $group := .Values.workloadDeployerGroups }}
@@ -31,4 +62,4 @@ subjects:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: workload-monitoring-editor
+  name: demo-api-deployer

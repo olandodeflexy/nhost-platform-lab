@@ -22,7 +22,14 @@ if [ "${#public_files[@]}" -eq 0 ]; then
 fi
 
 blocked_files=()
+scannable_files=()
 for file in "${public_files[@]}"; do
+  # A tracked deletion remains in `git ls-files --cached` until it is staged.
+  # It has no content that can be published, so omit it from the content scan.
+  if [ ! -e "$file" ]; then
+    continue
+  fi
+  scannable_files+=("$file")
   case "/${file}" in
     */.env.example | */.env.*.example)
       ;;
@@ -42,7 +49,9 @@ done
 user_home_pattern='/''Users/[^/[:space:]]+'
 
 set +e
-content_matches="$(rg -l -P --no-messages \
+content_matches=""
+if [ "${#scannable_files[@]}" -gt 0 ]; then
+  content_matches="$(rg -l -P --no-messages \
   -e '(?<![0-9A-Za-z])[0-9]{12}(?![0-9A-Za-z])' \
   -e 'AKIA[0-9A-Z]{16}' \
   -e 'ASIA[0-9A-Z]{16}' \
@@ -56,8 +65,11 @@ content_matches="$(rg -l -P --no-messages \
   -e '(?<![A-Za-z0-9])ou-[a-z0-9]{4,32}-[a-z0-9]{8,32}(?![A-Za-z0-9])' \
   -e '[A-Za-z0-9._%+-]+@yahoo\.com' \
   -e "$user_home_pattern" \
-  -- "${public_files[@]}")"
-rg_status=$?
+    -- "${scannable_files[@]}")"
+  rg_status=$?
+else
+  rg_status=1
+fi
 set -e
 
 if [ "$rg_status" -gt 1 ]; then

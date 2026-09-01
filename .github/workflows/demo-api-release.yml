@@ -5,184 +5,20 @@ on:
     types:
       - published
 
-permissions:
-  contents: read
-  id-token: write
+permissions: {}
 
 concurrency:
-  group: demo-api-release-${{ github.event.release.tag_name }}
+  group: demo-api-nonprod
   cancel-in-progress: false
 
 jobs:
-  delivery-capability:
+  delivery:
     if: startsWith(github.event.release.tag_name, 'demo-api@')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-
-    steps:
-      - name: Require a supported private delivery mode
-        env:
-          PRIVATE_ATTESTATIONS_SUPPORTED: ${{ vars.PRIVATE_ATTESTATIONS_SUPPORTED }}
-          REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          case "$REPOSITORY_VISIBILITY" in
-            private|internal)
-              ;;
-            public)
-              echo "release deployment is blocked: never attach the private EKS runner to a public repository" >&2
-              exit 1
-              ;;
-            *)
-              echo "release deployment is blocked: unrecognized repository visibility" >&2
-              exit 1
-              ;;
-          esac
-          if [ "$PRIVATE_ATTESTATIONS_SUPPORTED" != "true" ]; then
-            echo "release deployment is blocked: confirm private-repository artifact attestation support and set PRIVATE_ATTESTATIONS_SUPPORTED=true" >&2
-            exit 1
-          fi
-
-  build-publish:
-    needs:
-      - delivery-capability
-    if: startsWith(github.event.release.tag_name, 'demo-api@')
-    runs-on: ubuntu-24.04
-    environment: release
-    timeout-minutes: 45
-    outputs:
-      commit: ${{ steps.source.outputs.commit }}
-      digest: ${{ steps.publish.outputs.digest }}
-      version: ${{ steps.release.outputs.version }}
-      tag: ${{ steps.release.outputs.tag }}
-
-    steps:
-      - name: Resolve release reference
-        id: release
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          tag="$RELEASE_TAG"
-          if [[ ! "$tag" =~ ^demo-api@([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-            echo "release tag must be demo-api@X.Y.Z" >&2
-            exit 1
-          fi
-          echo "tag=$tag" >>"$GITHUB_OUTPUT"
-          echo "version=${BASH_REMATCH[1]}" >>"$GITHUB_OUTPUT"
-
-      - name: Check out released commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          ref: ${{ github.sha }}
-
-      - name: Resolve immutable release commit
-        id: source
-        shell: bash
-        run: |
-          set -euo pipefail
-          commit="$(git rev-parse HEAD)"
-          if [[ ! "$commit" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
-            echo "release did not resolve to a Git commit" >&2
-            exit 1
-          fi
-          echo "commit=$commit" >>"$GITHUB_OUTPUT"
-
-      - name: Set up Nix
-        uses: ./.github/actions/setup-nix
-
-      - name: Build and test release artifacts
-        run: nix flake check --no-update-lock-file --print-build-logs
-
-      - name: Configure core-account AWS credentials
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
-        with:
-          role-to-assume: arn:aws:iam::${{ secrets.AWS_CORE_ACCOUNT_ID }}:role/github-actions-nhost-platform-lab-release
-          aws-region: ${{ vars.ECR_REGION }}
-          allowed-account-ids: ${{ secrets.AWS_CORE_ACCOUNT_ID }}
-          mask-aws-account-id: true
-          output-credentials: false
-          role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}-release
-          unset-current-credentials: true
-
-      - name: Publish Nix-built image to ECR
-        id: publish
-        env:
-          AWS_REGION: ${{ vars.ECR_REGION }}
-          REGISTRY: ${{ secrets.AWS_CORE_ACCOUNT_ID }}.dkr.ecr.${{ vars.ECR_REGION }}.amazonaws.com
-          REPOSITORY: ${{ vars.ECR_REPOSITORY }}
-          VERSION: ${{ steps.release.outputs.version }}
-        run: >-
-          nix run --no-update-lock-file .#publish-image --
-          "$REGISTRY" "$REPOSITORY" "$VERSION"
-
-  deploy-nonprod:
-    needs:
-      - build-publish
     permissions:
       artifact-metadata: write
       attestations: write
       contents: read
       id-token: write
-    runs-on:
-      - self-hosted
-      - linux
-      - nonprod
-    environment: nonprod
-    timeout-minutes: 30
-
-    steps:
-      - name: Check out release
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          ref: ${{ needs.build-publish.outputs.commit }}
-
-      - name: Set up Nix
-        uses: ./.github/actions/setup-nix
-
-      - name: Configure non-production AWS credentials
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
-        with:
-          role-to-assume: arn:aws:iam::${{ secrets.AWS_NONPROD_ACCOUNT_ID }}:role/github-actions-nhost-platform-lab-deploy
-          aws-region: eu-west-1
-          allowed-account-ids: ${{ secrets.AWS_NONPROD_ACCOUNT_ID }}
-          mask-aws-account-id: true
-          output-credentials: false
-          role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}-nonprod
-          unset-current-credentials: true
-
-      - name: Deploy immutable image to non-production
-        env:
-          IMAGE_URI: ${{ secrets.AWS_CORE_ACCOUNT_ID }}.dkr.ecr.${{ vars.ECR_REGION }}.amazonaws.com/${{ vars.ECR_REPOSITORY }}
-        run: >-
-          nix run --no-update-lock-file .#deploy --
-          nonprod-eu-west-1
-          "${{ vars.NONPROD_CLUSTER_NAME }}"
-          eu-west-1
-          "$IMAGE_URI"
-          "${{ needs.build-publish.outputs.digest }}"
-
-      - name: Attest successful non-production deployment
-        id: promotion_attestation
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-name: ${{ secrets.AWS_CORE_ACCOUNT_ID }}.dkr.ecr.${{ vars.ECR_REGION }}.amazonaws.com/${{ vars.ECR_REPOSITORY }}
-          subject-digest: ${{ needs.build-publish.outputs.digest }}
-          predicate-type: https://github.com/${{ github.repository }}/attestations/nonprod-deployment/v1
-          predicate: >-
-            {"environment":"nonprod","status":"succeeded","version":"${{ needs.build-publish.outputs.version }}","releaseTag":"${{ needs.build-publish.outputs.tag }}","commit":"${{ needs.build-publish.outputs.commit }}","image":"${{ secrets.AWS_CORE_ACCOUNT_ID }}.dkr.ecr.${{ vars.ECR_REGION }}.amazonaws.com/${{ vars.ECR_REPOSITORY }}","digest":"${{ needs.build-publish.outputs.digest }}","workflowRun":"https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"}
-          show-summary: false
-
-      - name: Record promotion coordinates
-        run: |
-          {
-            echo "version=${{ needs.build-publish.outputs.version }}"
-            echo "commit=${{ needs.build-publish.outputs.commit }}"
-            echo "repository=${{ vars.ECR_REPOSITORY }}"
-            echo "digest=${{ needs.build-publish.outputs.digest }}"
-            echo "attestation=${{ steps.promotion_attestation.outputs['attestation-url'] }}"
-          } >>"$GITHUB_STEP_SUMMARY"
+    uses: olandodeflexy/nhost-platform-lab/.github/workflows/demo-api-release-delivery.yml@main
+    with:
+      release_tag: ${{ github.event.release.tag_name }}

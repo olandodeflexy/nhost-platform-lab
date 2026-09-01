@@ -4,6 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 modules=(
   "infra/bootstrap"
+  "infra/modules/codebuild-eks-deployer"
   "infra/modules/ecr"
   "infra/modules/eks"
   "infra/modules/github-oidc-role"

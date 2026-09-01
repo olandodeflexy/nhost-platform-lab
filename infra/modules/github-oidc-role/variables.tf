@@ -61,13 +61,26 @@ variable "github_environments" {
   }
 }
 
+variable "github_job_workflow_files" {
+  description = "Reusable workflow filenames under .github/workflows that may assume this role from refs/heads/main."
+  type        = set(string)
+
+  validation {
+    condition = (
+      length(var.github_job_workflow_files) > 0 &&
+      alltrue([for file in var.github_job_workflow_files : can(regex("^[A-Za-z0-9._-]+\\.ya?ml$", file))])
+    )
+    error_message = "At least one reusable workflow filename ending in .yml or .yaml is required."
+  }
+}
+
 variable "mode" {
   description = "Permission bundle for this role."
   type        = string
 
   validation {
-    condition     = contains(["ecr-publish", "eks-deploy"], var.mode)
-    error_message = "mode must be ecr-publish or eks-deploy."
+    condition     = contains(["ecr-publish", "eks-deploy", "codebuild-start"], var.mode)
+    error_message = "mode must be ecr-publish, eks-deploy, or codebuild-start."
   }
 }
 
@@ -78,7 +91,7 @@ variable "ecr_repository_arns" {
 }
 
 variable "ecr_pull_repository_arns" {
-  description = "ECR repositories an EKS deployment role may read while resolving and verifying promoted images."
+  description = "ECR repositories a deployment or CodeBuild starter role may read while verifying promoted images."
   type        = list(string)
   default     = []
 }
@@ -87,6 +100,17 @@ variable "eks_cluster_arns" {
   description = "EKS clusters the deploy role may describe."
   type        = list(string)
   default     = []
+}
+
+variable "codebuild_project_arns" {
+  description = "Exact CodeBuild projects a codebuild-start role may start, inspect, and stop."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for arn in var.codebuild_project_arns : can(regex("^arn:[a-z0-9-]+:codebuild:[a-z0-9-]+:[0-9]{12}:project/[A-Za-z0-9][A-Za-z0-9_-]+$", arn))])
+    error_message = "codebuild_project_arns must contain valid CodeBuild project ARNs."
+  }
 }
 
 variable "create_oidc_provider" {

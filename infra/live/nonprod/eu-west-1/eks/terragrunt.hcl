@@ -35,11 +35,6 @@ inputs = merge(include.root.inputs, {
   admin_principal_arns = [
     "arn:aws:iam::${local.account.account_id}:role/platform-admin",
   ]
-  deployment_principal_arns = [
-    "arn:aws:iam::${local.account.account_id}:role/github-actions-nhost-platform-lab-deploy",
-  ]
-  deployment_namespaces = ["demo-api"]
-
   controller_instance_types = ["m7i.large"]
   controller_min_size       = 2
   controller_max_size       = 3

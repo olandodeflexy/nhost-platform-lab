@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$#" -ne 7 ]; then
-  echo "usage: verify-promotion <registry-account-id> <source-region> <target-region> <repository> <version> <github-repository> <release-commit>" >&2
+if [ "$#" -ne 8 ]; then
+  echo "usage: verify-promotion <registry-account-id> <source-region> <target-region> <repository> <version> <github-repository> <release-commit> <nonprod-codebuild-project>" >&2
   exit 2
 fi
 
@@ -15,6 +15,7 @@ repository="$4"
 version="$5"
 github_repository="$6"
 release_commit="$7"
+nonprod_codebuild_project="$8"
 
 if [[ ! "$registry_account_id" =~ ^[0-9]{12}$ ]]; then
   echo "registry account ID must contain 12 digits" >&2
@@ -41,12 +42,16 @@ if [[ ! "$release_commit" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
   echo "release commit must be a 40- or 64-character Git object ID" >&2
   exit 2
 fi
+if [[ ! "$nonprod_codebuild_project" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{1,253}$ ]]; then
+  echo "non-production CodeBuild project name is invalid" >&2
+  exit 2
+fi
 
 source_registry="${registry_account_id}.dkr.ecr.${source_region}.amazonaws.com"
 source_image_uri="${source_registry}/${repository}"
 predicate_type="https://github.com/${github_repository}/attestations/nonprod-deployment/v1"
 release_ref="refs/tags/demo-api@${version}"
-certificate_identity="https://github.com/${github_repository}/.github/workflows/demo-api-release.yml@${release_ref}"
+signer_workflow="olandodeflexy/nhost-platform-lab/.github/workflows/demo-api-release-delivery.yml"
 
 source_digest="$(aws ecr describe-images \
   --registry-id "$registry_account_id" \
@@ -104,10 +109,11 @@ verification_file="${DOCKER_CONFIG}/verification.json"
 gh attestation verify \
   "oci://${source_image_uri}@${source_digest}" \
   --repo "$github_repository" \
-  --cert-identity "$certificate_identity" \
+  --signer-workflow "$signer_workflow" \
   --predicate-type "$predicate_type" \
   --source-digest "$release_commit" \
   --source-ref "$release_ref" \
+  --deny-self-hosted-runners \
   --format json >"$verification_file"
 
 if ! jq -e \
@@ -116,6 +122,7 @@ if ! jq -e \
   --arg commit "$release_commit" \
   --arg image "$source_image_uri" \
   --arg digest "$source_digest" \
+  --arg executor_project "$nonprod_codebuild_project" \
   'any(.[].verificationResult.statement.predicate;
     .environment == "nonprod" and
     .status == "succeeded" and
@@ -123,7 +130,10 @@ if ! jq -e \
     .releaseTag == $release_tag and
     .commit == $commit and
     .image == $image and
-    .digest == $digest)' \
+    .digest == $digest and
+    .executorProject == $executor_project and
+    (.executorBuild | type == "string") and
+    (.executorBuild | test("^" + $executor_project + ":[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")))' \
   "$verification_file" >/dev/null; then
   echo "no valid non-production deployment attestation matches version ${version}, commit ${release_commit}, and digest ${source_digest}" >&2
   exit 1

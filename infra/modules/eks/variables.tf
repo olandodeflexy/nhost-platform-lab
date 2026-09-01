@@ -57,34 +57,6 @@ variable "admin_principal_arns" {
   default     = []
 }
 
-variable "deployment_principal_arns" {
-  description = "CI deployment IAM role ARNs granted edit access only in deployment_namespaces."
-  type        = list(string)
-  default     = []
-}
-
-variable "deployment_namespaces" {
-  description = "Kubernetes namespaces in which CI deployment principals receive AmazonEKSEditPolicy."
-  type        = list(string)
-  default     = []
-
-  validation {
-    condition     = alltrue([for namespace in var.deployment_namespaces : length(trimspace(namespace)) > 0])
-    error_message = "deployment_namespaces cannot contain empty namespace names."
-  }
-}
-
-variable "deployment_kubernetes_groups" {
-  description = "Kubernetes groups assigned to deployment access entries for narrowly scoped supplemental RBAC."
-  type        = list(string)
-  default     = ["nhost-platform-lab:demo-api-deployers"]
-
-  validation {
-    condition     = length(var.deployment_kubernetes_groups) > 0 && alltrue([for group in var.deployment_kubernetes_groups : length(trimspace(group)) > 0 && !startswith(group, "system:")])
-    error_message = "deployment_kubernetes_groups must contain non-empty, non-system Kubernetes group names."
-  }
-}
-
 variable "controller_instance_types" {
   description = "Instance types for the small managed controller node group."
   type        = list(string)

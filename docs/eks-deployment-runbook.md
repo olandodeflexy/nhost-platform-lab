@@ -25,7 +25,7 @@ There are three milestones:
 
 1. **Cluster only:** network and EKS control plane exist.
 2. **Usable platform:** private access and platform add-ons are healthy.
-3. **Delivery platform:** ECR, GitHub OIDC, private runners, release, and
+3. **Delivery platform:** ECR, GitHub OIDC, private CodeBuild executors, release, and
    promotion are working.
 
 If the intended deployment uses one AWS account or only one cluster, change and
@@ -74,7 +74,7 @@ keys, or application secrets.
 | Route53 zones | Nonprod, production EU, and production US zone IDs |
 | Certificate contact email | Operational email address |
 | Karpenter AMI alias | Tested, dated AL2023 alias |
-| Private runner security group | Source allowed to reach EKS TCP/443 |
+| Private executor security group | Source allowed to reach EKS TCP/443 |
 | Plan and rollback owners | Evidence location and accountable owners |
 
 Optional shell variables used by examples:
@@ -573,13 +573,10 @@ All clusters set `endpoint_public_access = false`. AWS control-plane resources
 can be created from an authenticated workstation, but `kubectl`, Helm, and the
 `platform-addons` providers must run from the VPC or a connected network.
 
-Provision one of these reviewed access paths before the add-on phase:
-
-- after making the repository private, a clean-image, repository-scoped,
-  one-job EC2 runner reached through SSM;
-- a VPN-connected operator workstation;
-- a connected build network through peering or Transit Gateway;
-- another private execution environment with equivalent controls.
+Provision a reviewed administrator access path before the add-on phase, such
+as a VPN-connected operator workstation, a connected build network, or a
+separate manually invoked infrastructure executor. This identity must be able
+to assume `platform-admin`; the application CodeBuild service role must not.
 
 The execution environment requires:
 
@@ -589,28 +586,19 @@ The execution environment requires:
 - HTTPS egress to AWS APIs and the public Helm/OCI sources used by the module;
 - the pinned Nix toolchain and a clean checkout of the approved commit.
 
-Each EKS root creates a dedicated `private_runner_security_group_id` with no
+Each EKS root creates a dedicated `private_executor_security_group_id` with no
 inbound rules and only TCP/443 IPv4 egress, and permits TCP/443 to the private
 endpoint from that exact security group. Owning the source group and endpoint
 rule in one Terraform state makes their lifecycle explicit.
 
-The repository does not provision VPN, peering, Transit Gateway, or a runner.
-Attach the matching regional runner security group when provisioning the
-private host. Do not create an untracked console rule, add SSH ingress, or use a
-CIDR-wide cluster rule. Reach an EC2 runner through SSM instead.
+The regional application CodeBuild roots attach this group automatically. The
+repository does not provision the administrator's VPN, peering, Transit
+Gateway, or one-time infrastructure executor. Do not create an untracked
+console rule, add SSH ingress, or use a CIDR-wide cluster rule.
 
-The account `terraform-deploy` policies intentionally do not grant direct
-`ec2:RunInstances`, instance termination, or general `iam:PassRole`. Provision
-runner compute only through a separately reviewed module and least-privilege
-policy change. Do not install a GitHub runner on controller or Karpenter worker
-nodes.
-
-GitHub advises against self-hosted runners for public repositories. Ephemeral
-or JIT registration limits persistence but does not prove that the trusted
-deployment job will claim the runner before an untrusted fork-originated job.
-Make this repository private before registering any runner. Repository
-visibility may be reconsidered only after the runner is deregistered,
-terminated, wiped, and its logs and workflow artifacts are reviewed.
+The repository's delivery workflows use GitHub-hosted runners plus ordinary
+AWS CodeBuild. Never register a self-hosted GitHub runner for this public
+repository, and never install one on controller or Karpenter worker nodes.
 
 **Gate:** Do not apply any `platform-addons` root until the private host resolves
 the cluster endpoint, reaches TCP/443, and authenticates as `platform-admin`.
@@ -643,7 +631,9 @@ record.
 
 ### 5.1 Create GitHub OIDC roles
 
-Apply these first because EKS access entries reference their role ARNs:
+These roles can be created before the regional infrastructure because their
+policies use deterministic future project and repository ARNs. The deployment
+roles are CodeBuild starters and are never EKS access-entry principals:
 
 | Profile | Terragrunt unit |
 | --- | --- |
@@ -656,14 +646,15 @@ After each apply:
 ```bash
 terragrunt output role_arn
 terragrunt output github_subjects
+terragrunt output github_job_workflow_refs
 ```
 
 Expected subjects contain the exact immutable owner ID, repository ID, and
 environment. The environment names are `release`, `nonprod`, and `production`.
+Expected workflow refs identify only the matching trusted reusable delivery
+workflow on `refs/heads/main`.
 
-For cluster-only deployment, the core release role can be deferred. The
-nonprod/prod deploy roles remain prerequisites while their ARNs are present in
-the EKS live inputs.
+For cluster-only deployment, all GitHub roles can be deferred.
 
 ### 5.2 Create the core registry
 
@@ -676,7 +667,11 @@ AWS_PROFILE="${NHOST_CORE_OPERATOR_PROFILE}" aws ecr describe-registry \
   --query replicationConfiguration
 ```
 
-Apply:
+For the clearest end-to-end verification, apply this full root after the EKS and
+CodeBuild service roles in sections 5.4 and 5.5 exist. The repository policy
+uses account-root principals constrained by exact `aws:PrincipalArn` condition
+values, so role existence is not an ECR policy-creation requirement; the order
+instead ensures the first cross-account access test can succeed. Then apply:
 
 ```text
 infra/live/core/eu-central-1/registry
@@ -715,7 +710,7 @@ terragrunt output intra_subnet_ids
 The shared default network ACL is deliberately an explicit IPv4 allow-all ACL.
 It is stateless and cannot replace the stateful security-group boundary; an
 empty managed ACL would deny NAT return traffic, EKS control-plane traffic,
-nodes, and private runners.
+nodes, and private executors.
 
 **Gate:** Confirm the expected CIDR, three AZs, route/NAT design, flow logs,
 permissive shared ACL, restrictive default security group, and subnet roles
@@ -723,8 +718,9 @@ before creating EKS.
 
 ### 5.4 Create EKS
 
-Confirm that every ARN in `admin_principal_arns` and
-`deployment_principal_arns` already exists. Apply one at a time:
+Confirm that every ARN in `admin_principal_arns` exists. The live EKS roots do
+not grant GitHub or CodeBuild delivery access; each CodeBuild root creates its
+own group-backed STANDARD access entry later. Apply one at a time:
 
 ```text
 infra/live/nonprod/eu-west-1/eks
@@ -735,7 +731,7 @@ infra/live/prod/us-east-1/eks
 For the first deployment, apply only nonprod. The module creates:
 
 - Kubernetes 1.34 with private-only API access;
-- TCP/443 private-endpoint access from only the matching runner security group;
+- TCP/443 private-endpoint access from only the matching executor security group;
 - API-based access entries, KMS encryption, and control-plane logging;
 - a controller managed node group;
 - Karpenter IAM, queue, and interruption resources;
@@ -761,22 +757,50 @@ terragrunt output cluster_name
 terragrunt output cluster_arn
 terragrunt output cluster_security_group_id
 terragrunt output node_security_group_id
-terragrunt output private_runner_security_group_id
+terragrunt output private_executor_security_group_id
 terragrunt output karpenter_node_role_arn
 ```
 
-Confirm the private-runner group has no ingress and only TCP/443 IPv4 egress,
+Confirm the private-executor group has no ingress and only TCP/443 IPv4 egress,
 and that the cluster security group accepts TCP/443 from that group only.
 Confirm `karpenter.sh/discovery` is present on the shared node security group but
-absent from the cluster and private-runner groups; otherwise Karpenter would
+absent from the cluster and private-executor groups; otherwise Karpenter would
 attach an unintended security group to new workers.
 
 Do not continue if the cluster is not `ACTIVE`, nodes cannot join, an access
 entry is missing, an add-on is degraded, or the private operator path is absent.
 
-### 5.5 Create platform add-ons
+### 5.5 Create the application CodeBuild executors
 
-Run only from the private execution host. Confirm its source profile can assume
+Apply after the matching network and EKS root:
+
+```text
+infra/live/nonprod/eu-west-1/codebuild-deployer
+infra/live/prod/eu-west-1/codebuild-deployer
+infra/live/prod/us-east-1/codebuild-deployer
+```
+
+For the first deployment, apply only nonprod. Review that each plan creates one
+on-demand, non-privileged `NO_SOURCE` project, one exact-project service role,
+one seven-day log group, and one group-backed EKS access entry. It must not
+create an EKS access-policy association, GitHub webhook, source credential,
+artifact store, cache, inbound security-group rule, or public build.
+
+Capture and compare the deterministic outputs with the GitHub starter policy:
+
+```bash
+terragrunt output project_name
+terragrunt output project_arn
+terragrunt output service_role_arn
+terragrunt output log_group_name
+```
+
+Return to section 5.2 and apply the core registry after confirming all
+deterministic node and CodeBuild service-role ARNs in its repository policy.
+
+### 5.6 Create platform add-ons
+
+Run only from the private administrator path. Confirm its source profile can assume
 `terraform-deploy`, which in turn can assume `platform-admin`.
 
 Apply nonprod first:
@@ -805,7 +829,7 @@ encrypted `gp3` StorageClass, and prerequisites for `demo-api`.
 ## Phase 6: verify clusters and add-ons
 
 Run AWS checks with an identity authorized to read the cluster. Run Kubernetes
-checks from the private execution host.
+checks from the private administrator path.
 
 ### 6.1 Verify the control plane
 
@@ -922,7 +946,8 @@ Production is blocked until all of the following are recorded:
 - Cilium, DNS, ingress, certificates, external-dns, metrics, and monitoring are
   healthy;
 - Karpenter created and removed a test node;
-- GitHub deploy access cannot modify resources outside `demo-api`;
+- CodeBuild deploy access cannot modify resources outside the seven allowed
+  resource types in `demo-api`;
 - dashboards, logs, and alerts were inspected;
 - cost and capacity remain within the approved envelope.
 
@@ -945,26 +970,15 @@ permitting the release GitHub App to create those tags.
 
 Enable artifact attestations. Public repositories can use them on current
 GitHub plans; private or internal repositories require GitHub Enterprise Cloud.
-This creates an explicit deployment-mode gate: do not register this repository's
-self-hosted runners while it is public, and do not claim that the current
-attestation-backed promotion workflow works in a private repository unless the
-Enterprise capability is present.
-
-For the current self-hosted-runner design, first verify the private repository's
-artifact-attestation capability and then set the repository variable
-`PRIVATE_ATTESTATIONS_SUPPORTED=true`. Both release workflows fail on a public
-repository or when this explicit confirmation is absent, before publishing or
-queuing a privileged deployment job. Never set the variable merely to bypass
+The implemented public-repository path uses GitHub-hosted jobs plus fixed AWS
+CodeBuild projects; it never registers a self-hosted GitHub runner. For a
+private/internal repository, verify Enterprise support before setting
+`PRIVATE_ATTESTATIONS_SUPPORTED=true`. Never set that variable merely to bypass
 the gate.
 
-If GitHub Enterprise Cloud is not available, the supported lower-cost redesign
-is to keep the source repository public, execute private-cluster operations in
-an AWS-native VPC executor such as a narrowly scoped CodeBuild project, and
-return only the verified result to a GitHub-hosted job that creates the public
-attestation. That executor and its IAM/EKS access are not implemented by this
-repository yet and require a separate reviewed change. A public repository plus
-a self-hosted GitHub runner, or a private GitHub Free/Pro/Team repository plus
-the current attestation step, is not a deployable full-workflow configuration.
+The workflows also fail closed until `DELIVERY_EXECUTOR=codebuild`. Set it only
+after the exact projects, OIDC starter policies, regional ECR policies,
+namespace/custom RBAC, add-ons, and a nonprod test build have all passed review.
 
 ### 7.2 Configure protected identifiers, variables, and release credentials
 
@@ -982,11 +996,12 @@ Create these non-sensitive repository variables:
 
 | Variable | Value |
 | --- | --- |
+| `DELIVERY_EXECUTOR` | `codebuild` only after the executor gate passes |
 | `ECR_REGION` | `eu-central-1` |
 | `ECR_REPOSITORY` | `demo-api` |
-| `NONPROD_CLUSTER_NAME` | `nhost-lab-nonprod-eu-west-1` |
-| `PROD_EU_CLUSTER_NAME` | `nhost-lab-prod-eu-west-1` |
-| `PROD_US_CLUSTER_NAME` | `nhost-lab-prod-us-east-1` |
+| `NONPROD_CODEBUILD_PROJECT` | `nhost-lab-nonprod-eu-west-1-demo-api-deploy` |
+| `PROD_EU_CODEBUILD_PROJECT` | `nhost-lab-prod-eu-west-1-demo-api-deploy` |
+| `PROD_US_CODEBUILD_PROJECT` | `nhost-lab-prod-us-east-1-demo-api-deploy` |
 | `RELEASE_BOT_CLIENT_ID` | GitHub App Client ID |
 | `PRIVATE_ATTESTATIONS_SUPPORTED` | `true` only after verifying private-repository support |
 
@@ -1000,20 +1015,27 @@ create releases and tags. Store its credentials as:
 Do not create AWS access-key secrets. GitHub jobs obtain temporary credentials
 through OIDC.
 
+The release commit runs only in a credential-free build job. It cannot access an
+AWS environment or request a GitHub OIDC token. The tested image is uploaded as
+a raw, one-day artifact and passed by immutable artifact ID and SHA-256 digest to
+a fresh publisher job. Before requesting AWS credentials, the publisher checks
+out tooling from `job.workflow_sha`, verifies the downloaded digest, and proves
+that the image revision/source labels match the validated release. Never combine
+release-source execution and the ECR publisher credentials in one job.
+
 The workflows also ask the AWS credential action to mask the authenticated
 account ID, reject credentials issued for an unexpected account, clear inherited
-credentials on self-hosted runners, and avoid credential step outputs. Do not
+credentials, and avoid credential step outputs. Do not
 enable `TF_LOG`, Terragrunt debug/trace logging, `terragrunt render`, or public
 Terraform plan output with real deployment values. Plans, state, and CLI errors
 can contain ARNs, bucket names, network IDs, endpoints, and other account
 metadata even when no secret value is present.
 
-The non-production attestation names the fully qualified ECR image so that
-production can verify the deployed artifact. Its subject therefore contains the
-registry account ID as non-secret metadata. It remains repository-private under
-the current Enterprise/self-hosted-runner mode; it would be public under the
-documented public-source/AWS-executor alternative. If organizational policy
-treats the identifier as confidential, use only the private mode or redesign the
+The non-production attestation names the fully qualified ECR image, so its core
+AWS account ID is public, non-secret metadata in a public repository. The
+predicate records the account-free CodeBuild project name and build ID rather
+than the build ARN, avoiding additional disclosure of the nonprod account ID.
+If organizational policy treats account IDs as confidential, redesign the
 provenance subject before enabling releases.
 
 Application secrets are also prohibited in Kustomize, Terraform variables,
@@ -1021,35 +1043,28 @@ GitHub variables, and state outputs. A real application should retrieve them
 from AWS Secrets Manager through External Secrets or an equivalent operator
 using EKS Pod Identity.
 
-### 7.3 Register private runners
+### 7.3 Validate the fixed CodeBuild executors
 
-This section applies only when GitHub Enterprise Cloud supports artifact
-attestations for the private repository and the capability gate in section 7.1
-has passed. Otherwise implement and review the AWS-native executor path before
-continuing.
+Do not register a self-hosted GitHub runner. For each regional project, verify:
 
-First make the repository private and verify that visibility through the GitHub
-API. Do not register a self-hosted runner while the repository is public; JIT
-or ephemeral lifecycle is not a substitute for this provenance boundary. Once
-private, use only repository-scoped, clean-image, one-job ephemeral or
-just-in-time Linux runners with private connectivity and these exact labels:
+- `source.type=NO_SOURCE`, no webhook/source credential, and the reviewed
+  Terraform-owned buildspec;
+- the exact Public ECR image digest, non-privileged small on-demand compute,
+  automatic retry zero, concurrency one, no cache/artifacts/public build, and
+  the expected 30-minute project timeout and five-minute queue timeout;
+- matching private subnets and only the EKS executor security group;
+- an exact-project/source-account service-role trust and no IAM, SSM, Secrets,
+  S3, KMS, or role-chaining permissions;
+- a STANDARD EKS access entry containing only
+  `nhost-platform-lab:demo-api-deployers`, with no AWS-managed access policy;
+- the pre-provisioned namespace, ServiceAccount, narrow Role, and RoleBinding;
+- a seven-day private CloudWatch log group.
 
-- `self-hosted`, `linux`, `nonprod`;
-- `self-hosted`, `linux`, `prod-eu-west-1`;
-- `self-hosted`, `linux`, `prod-us-east-1`.
-
-Attach only the `private_runner_security_group_id` output from the matching
-regional EKS root. Place the runner in a private subnet with NAT egress,
-manage it through SSM, and do not add inbound security-group rules. Verify from
-the runner that the cluster endpoint resolves to private addresses and that
-TCP/443 succeeds before registering it with GitHub.
-
-Restrict runner groups to this repository, patch runner images, prevent
-credential persistence, forward runner diagnostic logs to external storage,
-and deregister, terminate, and wipe the instance immediately after its single
-job. Never register a persistent runner. Review logs, artifacts, and workflow
-stdout for disclosure before deciding whether to make the repository public
-again.
+Run a nonprod test with known release coordinates. Cancel it once and confirm
+the GitHub helper calls `StopBuild`; then run it to success and confirm the
+returned tag, commit, and digest exactly match the request. Test that source,
+buildspec, image, service-role, privileged-mode, and unexpected environment
+overrides are denied before setting `DELIVERY_EXECUTOR=codebuild`.
 
 ### 7.4 Verify ECR repositories and replication
 
@@ -1168,6 +1183,9 @@ Attach these artifacts to the deployment record:
 - [Karpenter AMI aliases](https://karpenter.sh/docs/concepts/nodeclasses/#specamiselectorterms)
 - [cert-manager Route53 DNS-01 policy](https://cert-manager.io/docs/configuration/acme/dns01/route53/)
 - [GitHub Actions OIDC reference](https://docs.github.com/en/actions/reference/security/oidc)
+- [GitHub OIDC with reusable workflows](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-with-reusable-workflows)
+- [AWS STS GitHub OIDC condition keys](https://docs.aws.amazon.com/service-authorization/latest/reference/list_sts.html)
 - [GitHub artifact-attestation availability](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations)
-- [GitHub self-hosted runner security](https://docs.github.com/en/actions/reference/security/secure-use#hardening-for-self-hosted-runners)
-- [GitHub ephemeral runners](https://docs.github.com/en/actions/reference/runners/self-hosted-runners#ephemeral-runners-for-autoscaling)
+- [AWS CodeBuild VPC access](https://docs.aws.amazon.com/codebuild/latest/userguide/enabling-vpc-access-in-projects.html)
+- [AWS CodeBuild `NO_SOURCE` projects](https://docs.aws.amazon.com/codebuild/latest/userguide/no-source.html)
+- [AWS CodeBuild confused-deputy protection](https://docs.aws.amazon.com/codebuild/latest/userguide/cross-service-confused-deputy-prevention.html)

@@ -19,6 +19,9 @@ inputs = merge(include.root.inputs, {
   github_environments = [
     "release",
   ]
+  github_job_workflow_files = [
+    "demo-api-release-delivery.yml",
+  ]
   ecr_repository_arns = [
     "arn:aws:ecr:eu-central-1:${local.account.account_id}:repository/demo-api",
   ]

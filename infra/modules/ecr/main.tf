@@ -11,7 +11,10 @@ provider "aws" {
 }
 
 locals {
-  replica_regions = toset(var.replication_regions)
+  replica_regions              = toset(var.replication_regions)
+  pull_account_ids             = toset([for arn in var.pull_role_arns : split(":", arn)[4]])
+  promotion_reader_account_ids = toset([for arn in var.promotion_reader_role_arns : split(":", arn)[4]])
+  has_cross_account_readers    = length(var.pull_role_arns) > 0 || length(var.promotion_reader_role_arns) > 0
   lifecycle_policy = jsonencode({
     rules = [
       {
@@ -86,34 +89,72 @@ resource "aws_ecr_lifecycle_policy" "replica" {
 }
 
 data "aws_iam_policy_document" "cross_account_pull" {
-  count = length(var.pull_account_ids) > 0 ? 1 : 0
+  count = local.has_cross_account_readers ? 1 : 0
 
-  statement {
-    sid    = "CrossAccountPull"
-    effect = "Allow"
+  dynamic "statement" {
+    for_each = length(var.pull_role_arns) > 0 ? [1] : []
 
-    principals {
-      type        = "AWS"
-      identifiers = [for id in var.pull_account_ids : "arn:aws:iam::${id}:root"]
+    content {
+      sid    = "CrossAccountNodePull"
+      effect = "Allow"
+
+      principals {
+        type        = "AWS"
+        identifiers = [for id in local.pull_account_ids : "arn:aws:iam::${id}:root"]
+      }
+
+      actions = [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer",
+      ]
+      resources = ["*"]
+
+      condition {
+        test     = "ArnEquals"
+        variable = "aws:PrincipalArn"
+        values   = var.pull_role_arns
+      }
     }
+  }
 
-    actions = [
-      "ecr:BatchCheckLayerAvailability",
-      "ecr:BatchGetImage",
-      "ecr:DescribeImages",
-      "ecr:GetDownloadUrlForLayer",
-    ]
+  dynamic "statement" {
+    for_each = length(var.promotion_reader_role_arns) > 0 ? [1] : []
+
+    content {
+      sid    = "CrossAccountPromotionRead"
+      effect = "Allow"
+
+      principals {
+        type        = "AWS"
+        identifiers = [for id in local.promotion_reader_account_ids : "arn:aws:iam::${id}:root"]
+      }
+
+      actions = [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:BatchGetImage",
+        "ecr:DescribeImages",
+        "ecr:GetDownloadUrlForLayer",
+      ]
+      resources = ["*"]
+
+      condition {
+        test     = "ArnEquals"
+        variable = "aws:PrincipalArn"
+        values   = var.promotion_reader_role_arns
+      }
+    }
   }
 }
 
 resource "aws_ecr_repository_policy" "cross_account_pull" {
-  count      = length(var.pull_account_ids) > 0 ? 1 : 0
+  count      = local.has_cross_account_readers ? 1 : 0
   repository = aws_ecr_repository.this.name
   policy     = data.aws_iam_policy_document.cross_account_pull[0].json
 }
 
 resource "aws_ecr_repository_policy" "replica_cross_account_pull" {
-  for_each = length(var.pull_account_ids) > 0 ? local.replica_regions : toset([])
+  for_each = local.has_cross_account_readers ? local.replica_regions : toset([])
 
   region     = each.value
   repository = aws_ecr_repository.replica[each.value].name

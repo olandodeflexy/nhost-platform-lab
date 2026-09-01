@@ -88,9 +88,10 @@ Create these OIDC roles with trust restricted to this repository:
   two production clusters and read-only access to the source and regional ECR
   repositories used to verify promotions.
 
-The ECR repository policy grants pull access to the non-production and production
-accounts. Worker-node roles still need the ECR read policies, which the EKS
-module attaches.
+The ECR repository policy delegates to the non-production and production
+accounts but requires `aws:PrincipalArn` to match the exact controller,
+Karpenter-node, or production promotion-verifier role. Worker-node roles still
+need the ECR read identity policies, which the EKS module attaches.
 
 The roles are implemented by `infra/modules/github-oidc-role`. Create the deploy
 roles before EKS because the cluster configuration grants them access by ARN.

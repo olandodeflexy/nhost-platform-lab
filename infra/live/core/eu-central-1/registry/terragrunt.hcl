@@ -15,9 +15,16 @@ terraform {
 
 inputs = merge(include.root.inputs, {
   repository_name = "demo-api"
-  pull_account_ids = [
-    local.nonprod_account.account_id,
-    local.prod_account.account_id,
+  pull_role_arns = [
+    "arn:aws:iam::${local.nonprod_account.account_id}:role/nhost-lab-nonprod-eu-west-1-controllers",
+    "arn:aws:iam::${local.nonprod_account.account_id}:role/nhost-lab-nonprod-eu-west-1-karpenter-node",
+    "arn:aws:iam::${local.prod_account.account_id}:role/nhost-lab-prod-eu-west-1-controllers",
+    "arn:aws:iam::${local.prod_account.account_id}:role/nhost-lab-prod-eu-west-1-karpenter-node",
+    "arn:aws:iam::${local.prod_account.account_id}:role/nhost-lab-prod-us-east-1-controllers",
+    "arn:aws:iam::${local.prod_account.account_id}:role/nhost-lab-prod-us-east-1-karpenter-node",
+  ]
+  promotion_reader_role_arns = [
+    "arn:aws:iam::${local.prod_account.account_id}:role/github-actions-nhost-platform-lab-deploy",
   ]
   replication_regions = [
     "eu-west-1",

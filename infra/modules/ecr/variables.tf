@@ -19,14 +19,37 @@ variable "repository_name" {
   default     = "demo-api"
 }
 
-variable "pull_account_ids" {
-  description = "AWS accounts allowed to pull images from this repository."
+variable "pull_role_arns" {
+  description = "Exact cross-account EKS node-role ARNs allowed to pull images. The roles may be created after the repository because they are matched through aws:PrincipalArn."
   type        = list(string)
   default     = []
 
   validation {
-    condition     = alltrue([for id in var.pull_account_ids : can(regex("^[0-9]{12}$", id))])
-    error_message = "Every pull_account_ids entry must be a 12-digit AWS account ID."
+    condition = (
+      length(var.pull_role_arns) == length(distinct(var.pull_role_arns)) &&
+      alltrue([
+        for arn in var.pull_role_arns :
+        can(regex("^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+$", arn))
+      ])
+    )
+    error_message = "pull_role_arns must contain unique, exact IAM role ARNs in the aws partition."
+  }
+}
+
+variable "promotion_reader_role_arns" {
+  description = "Exact cross-account CI role ARNs allowed to pull and inspect images while verifying a production promotion."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition = (
+      length(var.promotion_reader_role_arns) == length(distinct(var.promotion_reader_role_arns)) &&
+      alltrue([
+        for arn in var.promotion_reader_role_arns :
+        can(regex("^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+$", arn))
+      ])
+    )
+    error_message = "promotion_reader_role_arns must contain unique, exact IAM role ARNs in the aws partition."
   }
 }
 

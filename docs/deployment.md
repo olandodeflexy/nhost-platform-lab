@@ -93,6 +93,14 @@ accounts but requires `aws:PrincipalArn` to match the exact controller,
 Karpenter-node, or production promotion-verifier role. Worker-node roles still
 need the ECR read identity policies, which the EKS module attaches.
 
+ECR implicitly scopes each repository policy to the repository where it is
+installed. The policy statements intentionally omit `Resource`: adding
+`Resource = "*"` to these role-constrained statements is rejected by the ECR
+`SetRepositoryPolicy` API. Generic IAM resource-policy validation reports a
+missing-resource finding for this ECR-specific form, so deployment validation
+must include an ECR API acceptance check rather than treating that generic
+finding as authoritative.
+
 The roles are implemented by `infra/modules/github-oidc-role`. Create the deploy
 roles before EKS because the cluster configuration grants them access by ARN.
 
